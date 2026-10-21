@@ -5,6 +5,7 @@
 
 import { z } from 'zod';
 import { ErrorCode, McpError } from '@modelcontextprotocol/sdk/types.js';
+import type { GlpiClient } from '../glpi-client.js';
 import type { SearchCriterion } from '../search.js';
 import { type ItilItemtype, VALIDATION_STATUS } from '../itil.js';
 import { cleanTextFields, compactItem, pageLimit, stripLinks, text } from '../output.js';
@@ -69,7 +70,8 @@ function timelineDate(kind: TimelineKind, row: Record<string, unknown>): string 
   return typeof d === 'string' ? d : '';
 }
 
-function timelineEntry(
+/** One timeline row in the compact shape shared by glpi_get_ticket_timeline and glpi://ticket/{id}. */
+export function timelineEntry(
   kind: TimelineKind,
   raw: unknown,
   opts: { verbose?: boolean; max_content_chars?: number; raw_html?: boolean }
@@ -87,6 +89,52 @@ function timelineEntry(
 }
 
 // ---------------------------------------------------------------------------
+// "me": the User id of the connected account
+// ---------------------------------------------------------------------------
+
+/** Ticket search option of the observer (watcher) user; actor options share a uid, so the id stays static. */
+const OBSERVER_USER_FIELD = 66;
+
+/** Actor filter: a User id, or "me" for the account this server is connected as. */
+const actorId = (description?: string) => {
+  const schema = z
+    .preprocess(
+      (v) => (typeof v === 'string' && /^\s*\d+\s*$/.test(v) ? Number(v) : v),
+      z.union([z.number().int().nonnegative(), z.literal('me')])
+    )
+    .optional();
+  return description ? schema.describe(description) : schema;
+};
+
+const myUserIdCache = new WeakMap<GlpiClient, Promise<number>>();
+
+/** User id of the session (getFullSession -> session.glpiID), resolved once per process and client. */
+export function resolveMyUserId(client: GlpiClient): Promise<number> {
+  let cached = myUserIdCache.get(client);
+  if (!cached) {
+    cached = client.getFullSession().then((full) => {
+      const raw = ((full as { session?: Record<string, unknown> } | undefined)?.session ?? {}).glpiID;
+      const n = Number(raw);
+      if (!Number.isInteger(n) || n <= 0) throw new Error('getFullSession returned no session.glpiID');
+      return n;
+    });
+    // A failed lookup is not cached: the next call retries.
+    cached.catch(() => myUserIdCache.delete(client));
+    myUserIdCache.set(client, cached);
+  }
+  return cached;
+}
+
+async function actorValue(client: GlpiClient, value: number | 'me'): Promise<number> {
+  if (value !== 'me') return value;
+  try {
+    return await resolveMyUserId(client);
+  } catch (err) {
+    throw new Error(`Cannot resolve "me" to a user id (${err instanceof Error ? err.message : err}); pass the numeric id`);
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Tools
 // ---------------------------------------------------------------------------
 
@@ -95,13 +143,14 @@ const searchTickets = defineTool({
   title: 'Search tickets',
   toolset: 'tickets',
   description:
-    'Find tickets by status, actors, category, entity, opening dates or title. For other itemtypes use glpi_search_v2.',
+    'Find tickets by status, actors ("me" = connected user), category, entity, opening dates or title. For other itemtypes use glpi_search_v2.',
   inputSchema: {
     status: optInt(STATUS_TICKET_DESC),
     open_only: optBool('Open tickets only (status notold)'),
-    assigned_user_id: optId('Technician'),
+    assigned_user_id: actorId('Technician'),
     assigned_group_id: optId(),
-    requester_user_id: optId(),
+    requester_user_id: actorId(),
+    observer_user_id: actorId(),
     category_id: optId('ITILCategory id'),
     entity_id: optId('Entity id (0 = root)'),
     priority: optInt(PRIORITY_DESC),
@@ -123,9 +172,16 @@ const searchTickets = defineTool({
     };
     const f = (key: Parameters<typeof ticketField>[1]) => ticketField(client, key);
     if (q.status !== undefined) push({ field: await f('status'), searchtype: 'equals', value: q.status });
-    if (q.assigned_user_id !== undefined) push({ field: await f('technician_user'), searchtype: 'equals', value: q.assigned_user_id });
+    if (q.assigned_user_id !== undefined) {
+      push({ field: await f('technician_user'), searchtype: 'equals', value: await actorValue(client, q.assigned_user_id) });
+    }
     if (q.assigned_group_id !== undefined) push({ field: await f('technician_group'), searchtype: 'equals', value: q.assigned_group_id });
-    if (q.requester_user_id !== undefined) push({ field: await f('requester_user'), searchtype: 'equals', value: q.requester_user_id });
+    if (q.requester_user_id !== undefined) {
+      push({ field: await f('requester_user'), searchtype: 'equals', value: await actorValue(client, q.requester_user_id) });
+    }
+    if (q.observer_user_id !== undefined) {
+      push({ field: OBSERVER_USER_FIELD, searchtype: 'equals', value: await actorValue(client, q.observer_user_id) });
+    }
     if (q.category_id !== undefined) push({ field: await f('category'), searchtype: 'equals', value: q.category_id });
     if (q.entity_id !== undefined) push({ field: await f('entity'), searchtype: 'equals', value: q.entity_id });
     if (q.priority !== undefined) push({ field: await f('priority'), searchtype: 'equals', value: q.priority });

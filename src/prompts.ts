@@ -215,10 +215,9 @@ export const PROMPTS: readonly PromptDef[] = [
         'List the open GLPI tickets assigned to me (the account this server is connected as).',
         '',
         'Steps:',
-        '1. glpi_get_session_info {} — read me.id (the numeric User id of the connected account).',
-        '2. glpi_search_tickets {"assigned_user_id": <me.id>, "open_only": true, "sort": "time_to_resolve", "order": "ASC", "limit": 50}',
-        '   assigned_user_id takes the numeric id from step 1 ("me" is not accepted). If totalcount > 50, page with start = next_start.',
-        '3. Optionally glpi_list_overdue_tickets {} and keep the ones assigned to me to flag overdue tickets.',
+        '1. glpi_search_tickets {"assigned_user_id": "me", "open_only": true, "sort": "time_to_resolve", "order": "ASC", "limit": 50}',
+        '   "me" is the connected account (glpi_get_session_info shows who it is). If totalcount > 50, page with start = next_start.',
+        '2. Optionally glpi_list_overdue_tickets {} and keep the ones assigned to me to flag overdue tickets.',
         '',
         'Report: a table (id, title, status_label, priority, deadline, last update), overdue tickets first, then by priority; ' +
           'end with the three tickets to handle first and why. Read-only: do not modify tickets.',

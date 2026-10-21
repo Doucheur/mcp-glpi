@@ -551,3 +551,52 @@ test('open tickets are selected with status "notold" (GLPI matches Solved on les
   }
   await close();
 });
+
+test('glpi_search_tickets resolves "me" for actor filters once per process (getFullSession glpiID)', async () => {
+  const calls = installFetch((c) => {
+    if (c.path === 'listSearchOptions/Ticket') return json(TICKET_OPTIONS);
+    if (c.path === 'getFullSession') return json({ session: { glpiID: 7, glpiname: 'tech' } });
+    if (c.path === 'search/Ticket') return json({ totalcount: 0, count: 0, data: [] });
+    return undefined;
+  });
+  const { client, close } = await connect();
+  const schema = (await client.listTools()).tools.find((t) => t.name === 'glpi_search_tickets')!.inputSchema;
+  assert.match(JSON.stringify(schema.properties?.observer_user_id), /"me"/);
+
+  await client.callTool({ name: 'glpi_search_tickets', arguments: { assigned_user_id: 'me', open_only: true } });
+  await client.callTool({ name: 'glpi_search_tickets', arguments: { requester_user_id: 'me', observer_user_id: 'me' } });
+  await client.callTool({ name: 'glpi_search_tickets', arguments: { assigned_user_id: '12' } });
+  const searches = calls.filter((c) => c.path === 'search/Ticket');
+  assert.equal(searches[0].query.get('criteria[0][field]'), '5');
+  assert.equal(searches[0].query.get('criteria[0][value]'), '7');
+  assert.equal(searches[1].query.get('criteria[0][field]'), '4');
+  assert.equal(searches[1].query.get('criteria[0][value]'), '7');
+  assert.equal(searches[1].query.get('criteria[1][field]'), '66');
+  assert.equal(searches[1].query.get('criteria[1][value]'), '7');
+  assert.equal(searches[2].query.get('criteria[0][value]'), '12');
+  assert.equal(calls.filter((c) => c.path === 'getFullSession').length, 1, 'session user id cached');
+
+  await assert.rejects(
+    client.callTool({ name: 'glpi_search_tickets', arguments: { assigned_user_id: 'you' } }),
+    /Invalid arguments/
+  );
+  await close();
+});
+
+test('glpi_search_tickets reports an unresolvable "me" and retries on the next call', async () => {
+  let session: unknown = {};
+  const calls = installFetch((c) => {
+    if (c.path === 'listSearchOptions/Ticket') return json(TICKET_OPTIONS);
+    if (c.path === 'getFullSession') return json(session);
+    if (c.path === 'search/Ticket') return json({ totalcount: 0, count: 0, data: [] });
+    return undefined;
+  });
+  const { client, close } = await connect();
+  const res = await client.callTool({ name: 'glpi_search_tickets', arguments: { assigned_user_id: 'me' } });
+  assert.equal(res.isError, true);
+  assert.match(resultText(res), /Cannot resolve "me"/);
+  session = { session: { glpiID: '9' } };
+  await client.callTool({ name: 'glpi_search_tickets', arguments: { assigned_user_id: 'me' } });
+  assert.equal(calls.filter((c) => c.path === 'search/Ticket')[0].query.get('criteria[0][value]'), '9');
+  await close();
+});

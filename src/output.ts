@@ -85,7 +85,7 @@ export function htmlToText(input: string): string {
   s = decodeEntities(s);
   return s
     .replace(/\r\n?/g, '\n')
-    .replace(/[ \t\f\v ]+/g, ' ')
+    .replace(/[ \t\f\v\u00a0]+/g, ' ')
     .replace(/ *\n */g, '\n')
     .replace(/\n{3,}/g, '\n\n')
     .trim();

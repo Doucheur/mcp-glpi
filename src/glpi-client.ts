@@ -23,7 +23,7 @@ import { SearchOptionsCache } from './search-options.js';
 // CONFIG / INTERFACES
 // ============================================================================
 
-export interface GlpiConfig extends GlpiHttpConfig {}
+export type GlpiConfig = GlpiHttpConfig;
 
 export interface GlpiTicket {
   id: number;
@@ -939,7 +939,10 @@ export class GlpiClient {
     entities_id?: number;
     is_active?: number;
   }) {
-    return this.createItem('User', user);
+    // GLPI stores addresses in UserEmail rows: a plain `email` field is ignored,
+    // `_useremails` creates them along with the user.
+    const { email, ...fields } = user;
+    return this.createItem('User', email ? { ...fields, _useremails: [email] } : fields);
   }
 
   async updateUser(id: number, updates: Partial<GlpiUser>) {

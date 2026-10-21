@@ -1,0 +1,38 @@
+# Publishes the package to npm when a GitHub release is published.
+#
+# Setup (repository owner, once):
+#   1. Create an npm "Automation" (or granular, publish-enabled) access token
+#      on npmjs.com for the mcp-glpi package.
+#   2. Store it as the repository secret NPM_TOKEN
+#      (Settings > Secrets and variables > Actions > New repository secret).
+#
+# The release tag should match package.json "version" (e.g. v4.0.0).
+# --provenance links the published tarball to this workflow run; it needs
+# the id-token: write permission below and a public repository.
+name: Publish to npm
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      - run: npm test
+      # prepublishOnly runs build + lint + test again before the upload.
+      - run: npm publish --provenance --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
