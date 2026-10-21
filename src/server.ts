@@ -35,6 +35,7 @@ export const INSTRUCTIONS = `GLPI IT service management (tickets, problems, chan
 Choosing tools: glpi_search_tickets for tickets by status, actor, category, entity, dates or title; glpi_search_v2 for any itemtype with criteria (field names/ids from glpi_list_search_options) and glpi_count for totals; glpi_list_items / glpi_get_item for other itemtypes (assets, KB, contracts, groups, entities...); glpi_get_ticket_timeline for the followups, tasks, solutions and validations of a ticket, change or problem.
 Ids are per itemtype: Ticket 12 and Change 12 are unrelated; always pass the itemtype.
 Ticket status: 1 New, 2 Processing (assigned), 3 Processing (planned), 4 Pending, 5 Solved, 6 Closed. Problem: same plus 7 Accepted, 8 Under observation. Change: 1 New, 9 Evaluation, 10 Approval, 7 Accepted, 4 Pending, 11 Testing, 12 Qualification, 5 Applied, 8 Review, 6 Closed, 13 Refused, 14 Cancelled.
+Status search values: a number, or notold (open), old (solved/closed), all; no lessthan/morethan on status.
 Urgency and impact 1-5 (Very low..Very high); priority 1-6 (6 Major). Validation: 1 Waiting, 2 Granted, 3 Refused.
 Lists return {totalcount,start,count,next_start,items}: pass start=next_start for the next page.
 Write tools (create, update, delete, add, assign, link, set) change production data: confirm with the user first.

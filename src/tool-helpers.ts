@@ -371,6 +371,13 @@ export async function listTicketsByStatus(
   });
 }
 
+/**
+ * Search value of the ITIL status option for "not solved/closed" (statuses
+ * 1-4 for tickets). The status option is not ordered: `lessthan 5` makes GLPI
+ * match Solved tickets instead.
+ */
+export const OPEN_STATUS_VALUE = 'notold';
+
 /** Problem statuses that are not Solved (5) / Closed (6). */
 export const OPEN_PROBLEM_STATUSES = [1, 2, 3, 4, 7, 8] as const;
 /** Change statuses that are not Applied (5), Closed (6), Review (8), Refused (13), Cancelled (14). */

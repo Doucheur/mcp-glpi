@@ -86,7 +86,8 @@ const count = defineTool({
   toolset: 'search',
   description:
     'Number of items matching criteria (cheap, no rows). ' +
-    'Example: {"itemtype":"Ticket","criteria":[{"field":"status","searchtype":"lessthan","value":5}]} = open tickets.',
+    'Example: {"itemtype":"Ticket","criteria":[{"field":"status","searchtype":"equals","value":"notold"}]} = open tickets ' +
+      '(status also takes "old" = solved+closed, "all", or a number; it does not support lessthan/morethan).',
   inputSchema: {
     itemtype: itemtypeArg,
     criteria: criteriaSchema,

@@ -429,3 +429,22 @@ test('glpi_update_item enforces the Computer whitelist; delete_ticket purge need
   assert.equal(calls.at(-1)?.query.get('force_purge'), '1');
   await close();
 });
+
+test('open tickets are selected with status "notold" (GLPI matches Solved on lessthan 5)', async () => {
+  const calls = installFetch((c) => {
+    if (c.path === 'listSearchOptions/Ticket') return json(TICKET_OPTIONS);
+    if (c.path === 'search/Ticket') return json({ totalcount: 0, count: 0, data: [] });
+    return undefined;
+  });
+  const { client, close } = await connect();
+  await client.callTool({ name: 'glpi_search_tickets', arguments: { open_only: true } });
+  await client.callTool({ name: 'glpi_list_overdue_tickets', arguments: {} });
+  const searches = calls.filter((c) => c.path === 'search/Ticket');
+  assert.equal(searches.length, 2);
+  for (const s of searches) {
+    assert.equal(s.query.get('criteria[0][field]'), '12');
+    assert.equal(s.query.get('criteria[0][searchtype]'), 'equals');
+    assert.equal(s.query.get('criteria[0][value]'), 'notold');
+  }
+  await close();
+});

@@ -10,8 +10,11 @@
  */
 
 import { readFileSync } from 'node:fs';
+import { Client } from '@modelcontextprotocol/sdk/client/index.js';
+import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { GlpiClient } from '../src/glpi-client.js';
 import { GlpiError } from '../src/http.js';
+import { createMcpServer } from '../src/server.js';
 
 // --- tiny .env loader (no dependency) --------------------------------------
 try {
@@ -115,9 +118,9 @@ async function main() {
     return `${tickets.length} rows, latest id=${sampleTicketId ?? 'n/a'}`;
   });
 
-  await check('search Ticket (status<5, forcedisplay, limit 5)', async () => {
+  await check('search Ticket (status notold, forcedisplay, limit 5)', async () => {
     const res = await client.search.search('Ticket', {
-      criteria: [{ field: 12, searchtype: 'lessthan', value: 5 }],
+      criteria: [{ field: 12, searchtype: 'equals', value: 'notold' }],
       forcedisplay: [2, 1, 12],
       limit: 5,
     });
@@ -205,6 +208,66 @@ async function main() {
     const e = (await client.getEntities({ range: '0-4' })) as any[];
     return `${e.length} rows`;
   });
+
+  await check('getItemsPage(Computer, 0-4) — total from Content-Range', async () => {
+    const page = await client.getItemsPage('Computer', { range: '0-4' });
+    return `${page.items.length} rows of ${page.totalcount}`;
+  });
+
+  // ---- v4 tool layer (read-only tools through an in-memory MCP client) ----
+  console.log('\nTools (read-only, via MCP):');
+  const server = createMcpServer({ client, options: { readOnly: true } });
+  const [clientSide, serverSide] = InMemoryTransport.createLinkedPair();
+  const mcp = new Client({ name: 'smoke', version: '0' });
+  await Promise.all([server.connect(serverSide), mcp.connect(clientSide)]);
+  const call = async (name: string, args: Record<string, unknown>) => {
+    const res = await mcp.callTool({ name, arguments: args });
+    const text = (res.content as Array<{ text: string }>)[0]?.text ?? '';
+    if (res.isError) throw new Error(text.slice(0, 300));
+    return JSON.parse(text);
+  };
+  await check('tools/list (read-only)', async () => `${(await mcp.listTools()).tools.length} tools`);
+  let toolTicketId: number | undefined;
+  await check('glpi_search_tickets open_only limit 3', async () => {
+    const r = await call('glpi_search_tickets', { open_only: true, limit: 3 });
+    toolTicketId = r.items[0]?.id;
+    return `totalcount=${r.totalcount}, keys=${Object.keys(r.items[0] ?? {}).join(',')}`;
+  });
+  if (toolTicketId !== undefined) {
+    await check(`glpi_get_ticket(${toolTicketId})`, async () => {
+      const r = await call('glpi_get_ticket', { id: toolTicketId });
+      return `status_label=${r.status_label}, counts=${JSON.stringify(r.counts)}`;
+    });
+    await check(`glpi_get_ticket_timeline(${toolTicketId})`, async () => {
+      const r = await call('glpi_get_ticket_timeline', { id: toolTicketId });
+      return `${r.count} entries (${[...new Set(r.timeline.map((e: { kind: string }) => e.kind))].join(',') || 'none'})`;
+    });
+  }
+  await check('glpi_list_items Computer limit 2', async () => {
+    const r = await call('glpi_list_items', { itemtype: 'Computer', limit: 2 });
+    return `totalcount=${r.totalcount}, next_start=${r.next_start}`;
+  });
+  await check('glpi_search_v2 Computer name contains', async () => {
+    const r = await call('glpi_search_v2', { itemtype: 'Computer', criteria: [{ field: 'name', searchtype: 'contains', value: '' }], limit: 2 });
+    return `totalcount=${r.totalcount}`;
+  });
+  await check('glpi_list_changes limit 2', async () => {
+    const r = await call('glpi_list_changes', { limit: 2 });
+    return `totalcount=${r.totalcount}`;
+  });
+  await check('glpi_tickets_stats_by (status)', async () => {
+    const r = await call('glpi_tickets_stats_by', {});
+    return `total=${r.total}`;
+  });
+  await check('glpi_get_session_info', async () => {
+    const r = await call('glpi_get_session_info', {});
+    return `me=${r.me?.name ?? '?'}, profile=${r.active_profile?.name ?? '?'}, ${r.entities?.length ?? 0} entities`;
+  });
+  await check('legacy alias glpi_list_computers', async () => {
+    const r = await call('glpi_list_computers', { limit: 1 });
+    return `totalcount=${r.totalcount}`;
+  });
+  await mcp.close();
 
   // ---- write cycle ----
   if (WRITE) {

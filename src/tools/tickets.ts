@@ -9,6 +9,7 @@ import type { SearchCriterion } from '../search.js';
 import { type ItilItemtype, VALIDATION_STATUS } from '../itil.js';
 import { cleanTextFields, compactItem, pageLimit, stripLinks, text } from '../output.js';
 import {
+  OPEN_STATUS_VALUE,
   formatGlpiDate,
   parseValidationStatus,
   resolveLinkArgs,
@@ -89,7 +90,7 @@ const searchTickets = defineTool({
     'requester_name, technician_name, category, entity, date, date_mod...). For other itemtypes or arbitrary criteria use glpi_search_v2.',
   inputSchema: {
     status: optInt(STATUS_TICKET_DESC),
-    open_only: optBool('Only status < 5 (not solved/closed)'),
+    open_only: optBool('Only open tickets: New, Processing or Pending (not solved/closed)'),
     assigned_user_id: optId('Assigned technician (User id)'),
     assigned_group_id: optId('Assigned group (Group id)'),
     requester_user_id: optId('Requester (User id)'),
@@ -130,7 +131,8 @@ const searchTickets = defineTool({
     if (q.date_from) push({ field: await f('date'), searchtype: 'morethan', value: q.date_from });
     if (q.date_to) push({ field: await f('date'), searchtype: 'lessthan', value: q.date_to });
     if (q.text_search) push({ field: await f('name'), searchtype: 'contains', value: q.text_search });
-    if (q.open_only) push({ field: await f('status'), searchtype: 'lessthan', value: 5 });
+    // GLPI's status option has no ordering: 'lessthan 5' matches Solved. 'notold' = New..Pending.
+    if (q.open_only) push({ field: await f('status'), searchtype: 'equals', value: OPEN_STATUS_VALUE });
 
     const result = await client.search.search<Record<string, unknown>>('Ticket', {
       criteria,
@@ -213,7 +215,7 @@ const listOverdue = defineTool({
   name: 'glpi_list_overdue_tickets',
   title: 'List overdue tickets',
   toolset: 'tickets',
-  description: 'Open tickets (status < 5) whose resolution deadline (time_to_resolve) is past, oldest deadline first.',
+  description: 'Open tickets (not solved/closed) whose resolution deadline (time_to_resolve) is past, oldest deadline first.',
   inputSchema: {
     entity_id: optId('Entity id (0 = root entity)'),
     start: z.number().int().min(0).optional().describe('First row (default 0)'),
@@ -225,7 +227,7 @@ const listOverdue = defineTool({
     const now = formatGlpiDate(new Date());
     const ttr = await ticketField(client, 'time_to_resolve');
     const criteria: SearchCriterion[] = [
-      { field: await ticketField(client, 'status'), searchtype: 'lessthan', value: 5 },
+      { field: await ticketField(client, 'status'), searchtype: 'equals', value: OPEN_STATUS_VALUE },
       { field: ttr, searchtype: 'lessthan', value: now, link: 'AND' },
       { field: ttr, searchtype: 'notempty', value: '', link: 'AND' },
     ];

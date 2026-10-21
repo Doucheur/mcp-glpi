@@ -7,6 +7,7 @@ import type { GlpiClient } from './glpi-client.js';
 import { stripLinks } from './output.js';
 import {
   OPEN_PROBLEM_STATUSES,
+  OPEN_STATUS_VALUE,
   PENDING_CHANGE_STATUSES,
   TICKET_FIELDS,
   searchByStatuses,
@@ -23,11 +24,11 @@ export const RESOURCES: ResourceDef[] = [
   {
     uri: 'glpi://tickets/open',
     name: 'Open Tickets',
-    description: 'Tickets with status < 5 (100 most recently updated)',
+    description: 'Tickets not solved/closed (100 most recently updated)',
     read: async (client) =>
       (
         await client.search.search('Ticket', {
-          criteria: [{ field: TICKET_FIELDS.status, searchtype: 'lessthan', value: 5 }],
+          criteria: [{ field: TICKET_FIELDS.status, searchtype: 'equals', value: OPEN_STATUS_VALUE }],
           limit: 100,
           order: 'DESC',
           sort: TICKET_FIELDS.date_mod,
