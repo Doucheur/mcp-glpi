@@ -1,0 +1,139 @@
+/**
+ * Problems and changes. Followups/tasks/solutions on them go through the
+ * ticket write tools with `itemtype`, their timeline through
+ * glpi_get_ticket_timeline with `itemtype`.
+ */
+
+import { z } from 'zod';
+import { ErrorCode, McpError } from '@modelcontextprotocol/sdk/types.js';
+import { compactItem, listEnvelope, text } from '../output.js';
+import { defineTool, type ToolDef } from './registry.js';
+import {
+  PRIORITY_DESC,
+  STATUS_CHANGE_DESC,
+  STATUS_PROBLEM_DESC,
+  URGENCY_DESC,
+  defined,
+  id,
+  listShape,
+  optBool,
+  optId,
+  optInt,
+  optStr,
+  textShape,
+  toListOptions,
+} from './common.js';
+
+/** Keys of a problem/change in list results (no content). */
+export const ITIL_LIST_FIELDS = [
+  'id', 'name', 'status', 'status_label', 'urgency', 'urgency_label', 'priority', 'priority_label',
+  'itilcategories_id', 'entities_id', 'date', 'date_mod', 'solvedate', 'closedate',
+];
+
+function itilTools(itemtype: 'Problem' | 'Change'): ToolDef[] {
+  const lower = itemtype.toLowerCase();
+  const plural = `${lower}s`;
+  const statusDesc = itemtype === 'Problem' ? STATUS_PROBLEM_DESC : STATUS_CHANGE_DESC;
+
+  const list = defineTool({
+    name: `glpi_list_${plural}`,
+    title: `List ${plural}`,
+    toolset: 'itil',
+    description: `List ${plural}, newest first by default. Returns {totalcount,start,count,next_start,items} with status labels.`,
+    inputSchema: {
+      ...listShape,
+      verbose: optBool('All fields, as GLPI sends them'),
+    },
+    handler: async ({ client }, a) => {
+      const { opts, start } = toListOptions(a, 'DESC');
+      const page = await client.getItemsPage<Record<string, unknown>>(itemtype, opts);
+      const items = page.items.map((row) =>
+        compactItem(itemtype, row, a.verbose ? { verbose: true } : { fields: ITIL_LIST_FIELDS })
+      );
+      return text(listEnvelope(items, start, page.totalcount));
+    },
+  });
+
+  const get = defineTool({
+    name: `glpi_get_${lower}`,
+    title: `Get ${lower}`,
+    toolset: 'itil',
+    description:
+      `One ${lower} with status/urgency/priority labels, plain-text content and counts of followups/tasks/solutions` +
+      (itemtype === 'Change' ? '/validations' : '') +
+      `. Timeline: glpi_get_ticket_timeline with itemtype ${itemtype}.`,
+    inputSchema: {
+      id: id(`${itemtype} id`),
+      verbose: optBool('All fields, as GLPI sends them'),
+      ...textShape,
+    },
+    handler: async ({ client }, a) => {
+      const [obj, counts] = await Promise.all([
+        client.getItem(itemtype, a.id),
+        client.countItilChildren(itemtype, a.id, itemtype === 'Change'),
+      ]);
+      return text({ ...compactItem(itemtype, obj, a), counts });
+    },
+  });
+
+  const create = defineTool({
+    name: `glpi_create_${lower}`,
+    title: `Create ${lower}`,
+    toolset: 'itil',
+    description: `Create a ${lower}. Returns its id.`,
+    inputSchema: {
+      name: z.string().min(1).describe('Title'),
+      content: z.string().min(1).describe('Description'),
+      urgency: optInt(`Urgency: ${URGENCY_DESC}`),
+      impact: optInt(`Impact: ${URGENCY_DESC}`),
+      priority: optInt(`Priority: ${PRIORITY_DESC}`),
+      category_id: optId('ITILCategory id'),
+      entity_id: optId('Entity id (default: active entity)'),
+    },
+    handler: async ({ client }, a) => {
+      const result = await client.createItem(
+        itemtype,
+        defined({
+          name: a.name,
+          content: a.content,
+          urgency: a.urgency,
+          impact: a.impact,
+          priority: a.priority,
+          itilcategories_id: a.category_id,
+          entities_id: a.entity_id,
+        })
+      );
+      return text({ success: true, ...result });
+    },
+  });
+
+  const update = defineTool({
+    name: `glpi_update_${lower}`,
+    title: `Update ${lower}`,
+    toolset: 'itil',
+    description: `Change fields of a ${lower}. Only the fields given are written.`,
+    inputSchema: {
+      id: id(`${itemtype} id`),
+      name: optStr('Title'),
+      content: optStr('Description'),
+      status: optInt(statusDesc),
+      urgency: optInt(`Urgency: ${URGENCY_DESC}`),
+      impact: optInt(`Impact: ${URGENCY_DESC}`),
+      priority: optInt(`Priority: ${PRIORITY_DESC}`),
+      itilcategories_id: optId('ITILCategory id'),
+    },
+    handler: async ({ client }, a) => {
+      const { id: itemId, ...fields } = a;
+      const updates = defined(fields);
+      if (Object.keys(updates).length === 0) {
+        throw new McpError(ErrorCode.InvalidParams, 'nothing to update: pass at least one field besides id');
+      }
+      await client.updateItem(itemtype, itemId, updates);
+      return text({ success: true, id: itemId });
+    },
+  });
+
+  return [list, get, create, update];
+}
+
+export const ITIL_TOOLS: ToolDef[] = [...itilTools('Problem'), ...itilTools('Change')];
