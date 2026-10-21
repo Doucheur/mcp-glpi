@@ -5,6 +5,7 @@
 
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type { GlpiClient } from './glpi-client.js';
+import { registerPrompts } from './prompts.js';
 import { registerResources } from './resources.js';
 import { ALIASES } from './tools/aliases.js';
 import { ITEM_TOOLS } from './tools/items.js';
@@ -55,5 +56,6 @@ export function createMcpServer({ client, options = {}, tools = ALL_TOOLS, alias
   );
   registerAll(server, { client, options }, tools, aliases, options);
   registerResources(server, client);
+  registerPrompts(server, { client, options });
   return server;
 }
