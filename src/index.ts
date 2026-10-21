@@ -33,10 +33,8 @@ import type {
   ReadResourceRequest,
   ReadResourceResult,
 } from '@modelcontextprotocol/sdk/types.js';
-import { readFile } from 'node:fs/promises';
-import { basename, extname } from 'node:path';
 import { z } from 'zod';
-import { GlpiClient, GlpiConfig, ListOptions } from './glpi-client.js';
+import { GlpiClient, GlpiConfig } from './glpi-client.js';
 import { GlpiError } from './http.js';
 import {
   ConfigError,
@@ -45,16 +43,37 @@ import {
   parseTransportConfig,
   startHttpMcpServer,
 } from './http-server.js';
-import { SearchCriterion, SearchType, SearchLink } from './search.js';
+import { SearchCriterion, SearchType } from './search.js';
 import {
   CHANGE_STATUS,
   ItilItemtype,
   PROBLEM_STATUS,
+  TICKET_PRIORITY,
   TICKET_STATUS,
   TICKET_URGENCY,
   VALIDATION_STATUS,
   isItilItemtype,
 } from './itil.js';
+import {
+  CriteriaArg,
+  OPEN_PROBLEM_STATUSES,
+  PENDING_CHANGE_STATUSES,
+  TICKET_FIELDS,
+  formatGlpiDate,
+  formatTicketSummary,
+  listTicketsByStatus,
+  monthBuckets,
+  monthCriteria,
+  parseListArgs,
+  parseValidationStatus,
+  pickFields,
+  resolveCriteria,
+  resolveLinkArgs,
+  resolveUploadSource,
+  searchByStatuses,
+  ticketField,
+  validateToolArgs,
+} from './tool-helpers.js';
 
 /** Keep in sync with package.json (see CLAUDE.md). */
 const SERVER_VERSION = '3.4.0';
@@ -94,6 +113,10 @@ const ticketSearchSchema = z.object({
   open_only: z.boolean().optional(),
   start: z.number().int().min(0).optional(),
   limit: z.number().int().min(1).max(10000).optional(),
+  fetch_all: z.boolean().optional(),
+  max_rows: z.number().int().min(1).optional(),
+  sort: z.number().int().min(1).optional(),
+  order: z.enum(['ASC', 'DESC']).optional(),
 }).passthrough();
 
 // ---------------------------------------------------------------------------
@@ -102,26 +125,7 @@ const ticketSearchSchema = z.object({
 
 // Status / urgency labels: see src/itil.ts (GLPI CommonITILObject constants).
 
-// Standard Ticket search-option field ids (GLPI ≥ 9.5). Fallbacks; the
-// SearchOptions cache is used to resolve friendly names dynamically.
-const TICKET_FIELDS = {
-  id: 2,
-  name: 1,
-  status: 12,
-  date: 15,
-  date_mod: 19,
-  solvedate: 17,
-  closedate: 16,
-  priority: 3,
-  urgency: 10,
-  impact: 11,
-  category: 7,
-  entity: 80,
-  requester_user: 4,
-  technician_user: 5,
-  technician_group: 8,
-  type: 14,
-};
+// Ticket search-option ids: TICKET_FIELDS / ticketField() in src/tool-helpers.ts.
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -161,80 +165,12 @@ function getConfig(): GlpiConfig {
     password,
     timeoutMs: envInt('GLPI_TIMEOUT_MS'),
     maxRetries: envInt('GLPI_MAX_RETRIES'),
+    maxConcurrency: envInt('GLPI_MAX_CONCURRENCY') || undefined,
   };
-}
-
-/**
- * Parse common list-tool arguments into a ListOptions.
- *
- * Accepts (in order of precedence):
- *   - `range`: "START-END" string passed through as-is
- *   - `start` + `limit`: assembled into range
- *   - `limit` alone: range = "0-{limit-1}" (backward-compat with v2)
- */
-function parseListArgs(args: Record<string, unknown> | undefined): ListOptions {
-  const opts: ListOptions = {};
-  if (!args) return { range: '0-49', expand_dropdowns: true };
-
-  if (typeof args.range === 'string') {
-    opts.range = args.range;
-  } else if (args.start !== undefined || args.limit !== undefined) {
-    const start = (args.start as number) ?? 0;
-    const limit = (args.limit as number) ?? 50;
-    opts.range = `${start}-${start + limit - 1}`;
-  } else {
-    opts.range = '0-49';
-  }
-
-  if (args.sort !== undefined) opts.sort = args.sort as number | string;
-  if (args.order) opts.order = args.order as 'ASC' | 'DESC';
-  if (args.is_deleted !== undefined) opts.is_deleted = args.is_deleted as boolean;
-  if (args.include_deleted !== undefined) opts.is_deleted = args.include_deleted as boolean;
-  // Default expand_dropdowns to true for human-readable output.
-  opts.expand_dropdowns =
-    args.expand_dropdowns === false ? false : true;
-  return opts;
-}
-
-interface CriteriaArg {
-  field: number | string;
-  searchtype: SearchType;
-  value: string | number | boolean;
-  link?: SearchLink;
-}
-
-async function resolveCriteria(
-  client: GlpiClient,
-  itemtype: string,
-  raw: CriteriaArg[]
-): Promise<SearchCriterion[]> {
-  return Promise.all(
-    raw.map(async (c) => ({
-      field: (await client.searchOptions.resolveField(itemtype, c.field)) ??
-        (typeof c.field === 'number' ? c.field : 0),
-      searchtype: c.searchtype,
-      value: c.value,
-      link: c.link,
-    }))
-  );
 }
 
 function text(obj: unknown) {
   return { content: [{ type: 'text' as const, text: JSON.stringify(obj, null, 2) }] };
-}
-
-function formatTicketSummary(t: any) {
-  return {
-    id: t.id,
-    name: t.name,
-    status: TICKET_STATUS[t.status] ?? t.status,
-    urgency: TICKET_URGENCY[t.urgency] ?? t.urgency,
-    priority: TICKET_URGENCY[t.priority] ?? t.priority,
-    date: t.date,
-    date_mod: t.date_mod,
-    entities_id: t.entities_id,
-    itilcategories_id: t.itilcategories_id,
-  };
 }
 
 // ---------------------------------------------------------------------------
@@ -284,20 +220,10 @@ const LIST_TOOL_COMMON_PROPS = {
   },
   order: { type: 'string', enum: ['ASC', 'DESC'] },
   expand_dropdowns: { type: 'boolean', description: 'Resolve FK ids to labels (default true)' },
-};
-
-/** MIME types for glpi_upload_document, keyed by lowercase file extension. */
-const UPLOAD_MIME_TYPES: Record<string, string> = {
-  '.png': 'image/png',
-  '.jpg': 'image/jpeg',
-  '.jpeg': 'image/jpeg',
-  '.gif': 'image/gif',
-  '.webp': 'image/webp',
-  '.pdf': 'application/pdf',
-  '.txt': 'text/plain',
-  '.log': 'text/plain',
-  '.csv': 'text/csv',
-  '.zip': 'application/zip',
+  is_deleted: {
+    type: 'boolean',
+    description: 'true = list ONLY deleted (trashed) rows; false/omitted = only non-deleted rows',
+  },
 };
 
 // ---------------------------------------------------------------------------
@@ -339,14 +265,21 @@ function annotate<T extends { name: string }>(tool: T): T & { annotations: ToolA
 /** One entry of the tool catalogue, as `tools/list` reports it. */
 type ToolDefinition = ListToolsResult['tools'][number];
 
-const handleListTools = async (): Promise<ListToolsResult> => {
+/** Fields glpi_update_computer may change (anything else is rejected). */
+const COMPUTER_UPDATE_FIELDS = [
+  'name', 'serial', 'otherserial', 'uuid', 'contact', 'contact_num', 'comment',
+  'locations_id', 'states_id', 'computertypes_id', 'computermodels_id', 'manufacturers_id',
+  'users_id', 'groups_id', 'users_id_tech', 'groups_id_tech',
+] as const;
+
+function buildToolDefinitions(): ToolDefinition[] {
   // Annotating the array keeps `type: 'object'` literal instead of widening to
   // `string`, which the tools/list result type requires.
   const tools: ToolDefinition[] = [
     // ============== READ — TICKETS ==============
     {
       name: 'glpi_list_tickets',
-      description: 'List tickets. Supports start/limit/range/sort/order/status filter.',
+      description: 'List tickets. Supports start/limit/range/sort/order/status filter (status is filtered server-side).',
       inputSchema: {
         type: 'object',
         properties: {
@@ -528,7 +461,7 @@ const handleListTools = async (): Promise<ListToolsResult> => {
     },
     {
       name: 'glpi_assign_ticket',
-      description: 'Assign a ticket to a user OR a group. type: 1=requester, 2=assigned, 3=observer.',
+      description: 'Add a user and/or a group to a ticket (both links are created when both are given). type: 1=requester, 2=assigned (default), 3=observer.',
       inputSchema: {
         type: 'object',
         properties: {
@@ -542,15 +475,27 @@ const handleListTools = async (): Promise<ListToolsResult> => {
     },
     {
       name: 'glpi_link_tickets',
-      description: 'Link two tickets. link_type: 1=link 2=duplicate 3=parent.',
+      description:
+        'Link two tickets: "ticket_id <relation> other_ticket_id". relation: link (related), duplicate (ticket_id duplicates other_ticket_id), ' +
+        'child_of (ticket_id is a child of other_ticket_id), parent_of (ticket_id is the parent of other_ticket_id). ' +
+        'Legacy form parent_id + child_id (+ link_type) is still accepted: link_type 3 or 4 there means parent_id is the parent of child_id.',
       inputSchema: {
         type: 'object',
         properties: {
-          parent_id: { type: 'number' },
-          child_id: { type: 'number' },
-          link_type: { type: 'number' },
+          ticket_id: { type: 'number', description: 'Subject ticket' },
+          other_ticket_id: { type: 'number', description: 'Ticket it is related to' },
+          relation: {
+            type: 'string',
+            enum: ['link', 'duplicate', 'child_of', 'parent_of'],
+            description: 'Default link',
+          },
+          link_type: {
+            type: 'number',
+            description: 'Legacy numeric relation (GLPI constants): 1 link, 2 duplicate, 3 ticket_id is child of other_ticket_id, 4 ticket_id is parent of other_ticket_id',
+          },
+          parent_id: { type: 'number', description: 'Legacy: parent ticket (use ticket_id + relation)' },
+          child_id: { type: 'number', description: 'Legacy: child ticket (use other_ticket_id)' },
         },
-        required: ['parent_id', 'child_id'],
       },
     },
     {
@@ -573,7 +518,7 @@ const handleListTools = async (): Promise<ListToolsResult> => {
         type: 'object',
         properties: {
           validation_id: { type: 'number' },
-          status: { type: 'number', enum: [2, 3], description: '2=granted, 3=refused' },
+          status: { type: ['number', 'string'], enum: [2, 3, '2', '3'], description: '2=granted, 3=refused' },
           comment_validation: { type: 'string' },
         },
         required: ['validation_id', 'status'],
@@ -582,21 +527,24 @@ const handleListTools = async (): Promise<ListToolsResult> => {
     {
       name: 'glpi_upload_document',
       description:
-        'Upload a local file (by path) as a GLPI Document. If ticket_id is set, the document is also attached to that ticket.',
+        'Upload a file as a GLPI Document (max 20 MB), either inline (content_base64 + filename) or by file_path. ' +
+        'file_path is only allowed when the server sets GLPI_UPLOAD_DIR, and must resolve inside that directory (relative paths are resolved against it). ' +
+        'If ticket_id is set, the document is also attached to that ticket.',
       inputSchema: {
         type: 'object',
         properties: {
           file_path: {
             type: 'string',
-            description: 'Path of the file on the machine running this server',
+            description: 'Path of a file inside GLPI_UPLOAD_DIR on the machine running this server',
           },
+          content_base64: { type: 'string', description: 'File content, base64-encoded (alternative to file_path)' },
+          filename: { type: 'string', description: 'File name, required with content_base64 (e.g. "screenshot.png")' },
           name: { type: 'string', description: 'Document title (default: file name)' },
           ticket_id: {
             type: 'number',
             description: 'If set, attach the uploaded document to this ticket',
           },
         },
-        required: ['file_path'],
       },
     },
     {
@@ -760,12 +708,17 @@ const handleListTools = async (): Promise<ListToolsResult> => {
     },
     {
       name: 'glpi_update_computer',
-      description: 'Update a computer.',
+      description: 'Update a computer. Only the listed fields are accepted.',
       inputSchema: {
         type: 'object',
         properties: {
           id: { type: 'number' }, name: { type: 'string' }, serial: { type: 'string' },
+          otherserial: { type: 'string' }, uuid: { type: 'string' },
+          contact: { type: 'string' }, contact_num: { type: 'string' },
           comment: { type: 'string' }, locations_id: { type: 'number' }, states_id: { type: 'number' },
+          computertypes_id: { type: 'number' }, computermodels_id: { type: 'number' },
+          manufacturers_id: { type: 'number' }, users_id: { type: 'number' }, groups_id: { type: 'number' },
+          users_id_tech: { type: 'number' }, groups_id_tech: { type: 'number' },
         },
         required: ['id'],
       },
@@ -942,7 +895,7 @@ const handleListTools = async (): Promise<ListToolsResult> => {
     },
     {
       name: 'glpi_search_user',
-      description: 'Search a user by login name (exact "contains" on name field).',
+      description: 'Find a user by exact login name. Returns null if none; an error if several accounts share the login.',
       inputSchema: { type: 'object', properties: { name: { type: 'string' } }, required: ['name'] },
     },
     {
@@ -1035,7 +988,7 @@ const handleListTools = async (): Promise<ListToolsResult> => {
     },
     {
       name: 'glpi_tickets_stats_by',
-      description: 'Ticket count broken down by a dimension (status / category / technician / entity / month). Optional period filter.',
+      description: 'Ticket count broken down by a dimension (status / category / technician / entity / month). Optional period filter. dimension=month covers date_from..date_to (default last 6 months, max 36).',
       inputSchema: {
         type: 'object',
         properties: {
@@ -1145,8 +1098,23 @@ const handleListTools = async (): Promise<ListToolsResult> => {
     },
   ];
 
-  return { tools: tools.map(annotate) };
-};
+  return tools.map(annotate);
+}
+
+let toolDefinitions: ToolDefinition[] | undefined;
+let toolIndex: Map<string, ToolDefinition> | undefined;
+
+function getToolDefinitions(): ToolDefinition[] {
+  toolDefinitions ??= buildToolDefinitions();
+  return toolDefinitions;
+}
+
+function getToolDefinition(name: string): ToolDefinition | undefined {
+  toolIndex ??= new Map(getToolDefinitions().map((t) => [t.name, t]));
+  return toolIndex.get(name);
+}
+
+const handleListTools = async (): Promise<ListToolsResult> => ({ tools: getToolDefinitions() });
 
 // ---------------------------------------------------------------------------
 // Tool dispatch
@@ -1154,40 +1122,39 @@ const handleListTools = async (): Promise<ListToolsResult> => {
 
 const handleCallTool = async (request: CallToolRequest): Promise<CallToolResult> => {
   const { name, arguments: argsRaw } = request.params;
-  const args = (argsRaw ?? {}) as Record<string, unknown>;
+  let args = (argsRaw ?? {}) as Record<string, unknown>;
 
   try {
+    // Required args + id-like params (positive integers) checked from the
+    // tool's own schema, so a missing id is InvalidParams, never `Item/undefined`.
+    const definition = getToolDefinition(name);
+    if (definition) args = validateToolArgs(definition.inputSchema as Parameters<typeof validateToolArgs>[0], args);
+
     switch (name) {
       // ==== TICKETS — read ====
       case 'glpi_list_tickets': {
-        const validated = listArgsSchema.parse(args);
+        const validated = listArgsSchema.extend({ status: z.coerce.number().int().min(1).optional() }).parse(args);
         const opts = parseListArgs(validated);
-        let tickets = await client.getTickets({ ...opts, order: opts.order ?? 'DESC' });
-        if (typeof validated.status === 'number') {
-          tickets = tickets.filter((t: any) => t.status === validated.status);
+        if (validated.status !== undefined) {
+          return text(await listTicketsByStatus(client, validated.status, { ...opts, order: opts.order ?? 'DESC' }));
         }
+        const tickets = await client.getTickets({ ...opts, order: opts.order ?? 'DESC' });
         return text(tickets.map(formatTicketSummary));
       }
 
       case 'glpi_get_ticket': {
         const validated = ticketReadSchema.parse(args);
         const { id, with_logs } = validated;
-        const [ticket, followups, tasks, solutions] = await Promise.all([
+        const [ticket, counts] = await Promise.all([
           client.getTicket(id, { with_logs }),
-          client.getTicketFollowups(id),
-          client.getTicketTasks(id),
-          client.getTicketSolutions(id),
+          client.countItilChildren('Ticket', id),
         ]);
         return text({
           ...ticket,
           status_label: TICKET_STATUS[(ticket as any).status],
           urgency_label: TICKET_URGENCY[(ticket as any).urgency],
-          priority_label: TICKET_URGENCY[(ticket as any).priority],
-          counts: {
-            followups: followups.length,
-            tasks: tasks.length,
-            solutions: solutions.length,
-          },
+          priority_label: TICKET_PRIORITY[(ticket as any).priority],
+          counts,
         });
       }
 
@@ -1225,33 +1192,34 @@ const handleCallTool = async (request: CallToolRequest): Promise<CallToolResult>
       }
 
       case 'glpi_search_tickets': {
-        ticketSearchSchema.parse(args);
+        const q = ticketSearchSchema.parse(args);
         const criteria: SearchCriterion[] = [];
         const push = (c: SearchCriterion) => {
           if (criteria.length > 0 && !c.link) c.link = 'AND';
           criteria.push(c);
         };
-        if (args.status !== undefined) push({ field: TICKET_FIELDS.status, searchtype: 'equals', value: args.status as number });
-        if (args.assigned_user_id !== undefined) push({ field: TICKET_FIELDS.technician_user, searchtype: 'equals', value: args.assigned_user_id as number });
-        if (args.assigned_group_id !== undefined) push({ field: TICKET_FIELDS.technician_group, searchtype: 'equals', value: args.assigned_group_id as number });
-        if (args.requester_user_id !== undefined) push({ field: TICKET_FIELDS.requester_user, searchtype: 'equals', value: args.requester_user_id as number });
-        if (args.category_id !== undefined) push({ field: TICKET_FIELDS.category, searchtype: 'equals', value: args.category_id as number });
-        if (args.entity_id !== undefined) push({ field: TICKET_FIELDS.entity, searchtype: 'equals', value: args.entity_id as number });
-        if (args.priority !== undefined) push({ field: TICKET_FIELDS.priority, searchtype: 'equals', value: args.priority as number });
-        if (args.urgency !== undefined) push({ field: TICKET_FIELDS.urgency, searchtype: 'equals', value: args.urgency as number });
-        if (args.date_from) push({ field: TICKET_FIELDS.date, searchtype: 'morethan', value: args.date_from as string });
-        if (args.date_to) push({ field: TICKET_FIELDS.date, searchtype: 'lessthan', value: args.date_to as string });
-        if (args.text_search) push({ field: TICKET_FIELDS.name, searchtype: 'contains', value: args.text_search as string });
-        if (args.open_only) push({ field: TICKET_FIELDS.status, searchtype: 'lessthan', value: 5 });
+        const f = (key: Parameters<typeof ticketField>[1]) => ticketField(client, key);
+        if (q.status !== undefined) push({ field: await f('status'), searchtype: 'equals', value: q.status });
+        if (q.assigned_user_id !== undefined) push({ field: await f('technician_user'), searchtype: 'equals', value: q.assigned_user_id });
+        if (q.assigned_group_id !== undefined) push({ field: await f('technician_group'), searchtype: 'equals', value: q.assigned_group_id });
+        if (q.requester_user_id !== undefined) push({ field: await f('requester_user'), searchtype: 'equals', value: q.requester_user_id });
+        if (q.category_id !== undefined) push({ field: await f('category'), searchtype: 'equals', value: q.category_id });
+        if (q.entity_id !== undefined) push({ field: await f('entity'), searchtype: 'equals', value: q.entity_id });
+        if (q.priority !== undefined) push({ field: await f('priority'), searchtype: 'equals', value: q.priority });
+        if (q.urgency !== undefined) push({ field: await f('urgency'), searchtype: 'equals', value: q.urgency });
+        if (q.date_from) push({ field: await f('date'), searchtype: 'morethan', value: q.date_from });
+        if (q.date_to) push({ field: await f('date'), searchtype: 'lessthan', value: q.date_to });
+        if (q.text_search) push({ field: await f('name'), searchtype: 'contains', value: q.text_search });
+        if (q.open_only) push({ field: await f('status'), searchtype: 'lessthan', value: 5 });
 
         const result = await client.search.search('Ticket', {
           criteria,
-          start: (args.start as number) ?? 0,
-          limit: (args.limit as number) ?? 50,
-          fetchAll: args.fetch_all as boolean,
-          maxRows: args.max_rows as number,
-          sort: args.sort as number,
-          order: (args.order as 'ASC' | 'DESC') ?? 'DESC',
+          start: q.start ?? 0,
+          limit: q.limit ?? 50,
+          fetchAll: q.fetch_all,
+          maxRows: q.max_rows,
+          sort: q.sort,
+          order: q.order ?? 'DESC',
           expandDropdowns: true,
         });
 
@@ -1314,10 +1282,8 @@ const handleCallTool = async (request: CallToolRequest): Promise<CallToolResult>
       case 'glpi_update_ticket': {
         const id = args.id as number;
         if (!id) throw new McpError(ErrorCode.InvalidParams, 'id required');
-        const updates: Record<string, unknown> = {};
-        ['name', 'content', 'status', 'urgency', 'priority', 'impact', 'itilcategories_id'].forEach((k) => {
-          if (args[k] !== undefined) updates[k] = args[k];
-        });
+        const updates = pickFields(name, args, ['name', 'content', 'status', 'urgency', 'priority', 'impact', 'itilcategories_id']);
+        if (Object.keys(updates).length === 0) throw new McpError(ErrorCode.InvalidParams, 'nothing to update');
         await client.updateTicket(id, updates as any);
         return text({ success: true, id });
       }
@@ -1372,18 +1338,18 @@ const handleCallTool = async (request: CallToolRequest): Promise<CallToolResult>
           groups_id: group_id,
           type: args.type as number,
         });
-        return text({ success: true, assignment_id: result.id });
+        return text({
+          success: true,
+          assignment_id: result.id,
+          ...(result.user_link_id !== undefined ? { user_assignment_id: result.user_link_id } : {}),
+          ...(result.group_link_id !== undefined ? { group_assignment_id: result.group_link_id } : {}),
+        });
       }
 
       case 'glpi_link_tickets': {
-        const parent_id = args.parent_id as number;
-        const child_id = args.child_id as number;
-        if (!parent_id || !child_id) throw new McpError(ErrorCode.InvalidParams, 'parent_id and child_id required');
-        // parent_id/child_id carry the direction: 3/4 both mean "parent_id is the parent".
-        const legacyRelation = { 1: 'link', 2: 'duplicate', 3: 'parent_of', 4: 'parent_of' } as const;
-        const relation = legacyRelation[((args.link_type as number) ?? 1) as 1 | 2 | 3 | 4] ?? 'link';
-        const result = await client.linkTickets(parent_id, child_id, relation);
-        return text({ success: true, link_id: result.id });
+        const { ticketId, otherTicketId, relation } = resolveLinkArgs(args);
+        const result = await client.linkTickets(ticketId, otherTicketId, relation);
+        return text({ success: true, link_id: result.id, ticket_id: ticketId, other_ticket_id: otherTicketId, relation });
       }
 
       case 'glpi_add_ticket_validation': {
@@ -1401,10 +1367,7 @@ const handleCallTool = async (request: CallToolRequest): Promise<CallToolResult>
 
       case 'glpi_set_validation_status': {
         const validation_id = args.validation_id as number;
-        const status = args.status as 2 | 3;
-        if (!validation_id || (status !== 2 && status !== 3)) {
-          throw new McpError(ErrorCode.InvalidParams, 'validation_id and status (2 or 3) required');
-        }
+        const status = parseValidationStatus(args.status);
         await client.setTicketValidationStatus(
           validation_id,
           status,
@@ -1414,27 +1377,16 @@ const handleCallTool = async (request: CallToolRequest): Promise<CallToolResult>
       }
 
       case 'glpi_upload_document': {
-        const filePath = args.file_path as string;
-        if (!filePath) throw new McpError(ErrorCode.InvalidParams, 'file_path required');
-        let data: Uint8Array;
-        try {
-          data = await readFile(filePath);
-        } catch (err) {
-          throw new McpError(
-            ErrorCode.InvalidParams,
-            `cannot read file "${filePath}": ${err instanceof Error ? err.message : err}`
-          );
-        }
-        const filename = basename(filePath);
+        const source = await resolveUploadSource(args);
         const ticket_id = args.ticket_id as number | undefined;
         // Linking via the manifest (itemtype/items_id) lets GLPI create the
         // Document_Item itself, which also works for restricted profiles that
         // cannot POST Document_Item directly.
         const document = await client.uploadDocument({
-          filename,
-          data,
+          filename: source.filename,
+          data: source.data,
           name: args.name as string | undefined,
-          mimeType: UPLOAD_MIME_TYPES[extname(filename).toLowerCase()],
+          mimeType: source.mimeType,
           ...(ticket_id ? { itemtype: 'Ticket', items_id: ticket_id } : {}),
         });
         return text({ success: true, document_id: document.id, ...(ticket_id ? { ticket_id } : {}) });
@@ -1457,22 +1409,23 @@ const handleCallTool = async (request: CallToolRequest): Promise<CallToolResult>
       }
 
       case 'glpi_list_overdue_tickets': {
-        const now = new Date().toISOString().slice(0, 19).replace('T', ' ');
+        // GLPI stores server-local datetimes: compare with local time, not UTC.
+        const now = formatGlpiDate(new Date());
+        const ttr = await ticketField(client, 'time_to_resolve');
         const criteria: SearchCriterion[] = [
-          { field: TICKET_FIELDS.status, searchtype: 'lessthan', value: 5 },
-          // time_to_resolve search-option id is typically 18; fall back to 18.
-          { field: 18, searchtype: 'lessthan', value: now, link: 'AND' },
-          { field: 18, searchtype: 'notempty', value: '', link: 'AND' },
+          { field: await ticketField(client, 'status'), searchtype: 'lessthan', value: 5 },
+          { field: ttr, searchtype: 'lessthan', value: now, link: 'AND' },
+          { field: ttr, searchtype: 'notempty', value: '', link: 'AND' },
         ];
         if (args.entity_id !== undefined) {
-          criteria.push({ field: TICKET_FIELDS.entity, searchtype: 'equals', value: args.entity_id as number, link: 'AND' });
+          criteria.push({ field: await ticketField(client, 'entity'), searchtype: 'equals', value: args.entity_id as number, link: 'AND' });
         }
         const result = await client.search.search('Ticket', {
           criteria,
           limit: (args.limit as number) ?? 50,
           expandDropdowns: true,
           order: 'ASC',
-          sort: 18,
+          sort: ttr,
         });
         return text({
           totalcount: result.totalcount,
@@ -1494,17 +1447,15 @@ const handleCallTool = async (request: CallToolRequest): Promise<CallToolResult>
       case 'glpi_get_problem': {
         const id = args.id as number;
         if (!id) throw new McpError(ErrorCode.InvalidParams, 'id required');
-        const [p, followups, tasks, solutions] = await Promise.all([
+        const [p, counts] = await Promise.all([
           client.getProblem(id),
-          client.getItilFollowups('Problem', id),
-          client.getItilTasks('Problem', id),
-          client.getItilSolutions('Problem', id),
+          client.countItilChildren('Problem', id),
         ]);
         return text({
           ...p,
           status_label: PROBLEM_STATUS[(p as any).status],
           urgency_label: TICKET_URGENCY[(p as any).urgency],
-          counts: { followups: followups.length, tasks: tasks.length, solutions: solutions.length },
+          counts,
         });
       }
       case 'glpi_get_problem_tasks': {
@@ -1525,10 +1476,8 @@ const handleCallTool = async (request: CallToolRequest): Promise<CallToolResult>
       }
       case 'glpi_update_problem': {
         const id = args.id as number;
-        const updates: Record<string, unknown> = {};
-        ['name', 'content', 'status', 'urgency'].forEach((k) => {
-          if (args[k] !== undefined) updates[k] = args[k];
-        });
+        const updates = pickFields(name, args, ['name', 'content', 'status', 'urgency']);
+        if (Object.keys(updates).length === 0) throw new McpError(ErrorCode.InvalidParams, 'nothing to update');
         await client.updateProblem(id, updates as any);
         return text({ success: true, id });
       }
@@ -1545,23 +1494,15 @@ const handleCallTool = async (request: CallToolRequest): Promise<CallToolResult>
       case 'glpi_get_change': {
         const id = args.id as number;
         if (!id) throw new McpError(ErrorCode.InvalidParams, 'id required');
-        const [c, followups, tasks, solutions, validations] = await Promise.all([
+        const [c, counts] = await Promise.all([
           client.getChange(id),
-          client.getItilFollowups('Change', id),
-          client.getItilTasks('Change', id),
-          client.getItilSolutions('Change', id),
-          client.getItilValidations('Change', id),
+          client.countItilChildren('Change', id, true),
         ]);
         return text({
           ...c,
           status_label: CHANGE_STATUS[(c as any).status],
           urgency_label: TICKET_URGENCY[(c as any).urgency],
-          counts: {
-            followups: followups.length,
-            tasks: tasks.length,
-            solutions: solutions.length,
-            validations: validations.length,
-          },
+          counts,
         });
       }
       case 'glpi_get_change_tasks': {
@@ -1582,10 +1523,8 @@ const handleCallTool = async (request: CallToolRequest): Promise<CallToolResult>
       }
       case 'glpi_update_change': {
         const id = args.id as number;
-        const updates: Record<string, unknown> = {};
-        ['name', 'content', 'status'].forEach((k) => {
-          if (args[k] !== undefined) updates[k] = args[k];
-        });
+        const updates = pickFields(name, args, ['name', 'content', 'status']);
+        if (Object.keys(updates).length === 0) throw new McpError(ErrorCode.InvalidParams, 'nothing to update');
         await client.updateChange(id, updates as any);
         return text({ success: true, id });
       }
@@ -1604,7 +1543,8 @@ const handleCallTool = async (request: CallToolRequest): Promise<CallToolResult>
         return text({ success: true, ...(await client.createComputer(args)) });
       case 'glpi_update_computer': {
         const id = args.id as number;
-        const updates = { ...args }; delete (updates as any).id;
+        const updates = pickFields(name, args, COMPUTER_UPDATE_FIELDS);
+        if (Object.keys(updates).length === 0) throw new McpError(ErrorCode.InvalidParams, 'nothing to update');
         await client.updateComputer(id, updates as any);
         return text({ success: true, id });
       }
@@ -1687,10 +1627,8 @@ const handleCallTool = async (request: CallToolRequest): Promise<CallToolResult>
         return text({ success: true, ...(await client.createProject(args)) });
       case 'glpi_update_project': {
         const id = args.id as number;
-        const updates: Record<string, unknown> = {};
-        ['name', 'content', 'percent_done', 'real_start_date', 'real_end_date'].forEach((k) => {
-          if (args[k] !== undefined) updates[k] = args[k];
-        });
+        const updates = pickFields(name, args, ['name', 'content', 'percent_done', 'real_start_date', 'real_end_date']);
+        if (Object.keys(updates).length === 0) throw new McpError(ErrorCode.InvalidParams, 'nothing to update');
         await client.updateProject(id, updates as any);
         return text({ success: true, id });
       }
@@ -1811,24 +1749,14 @@ const handleCallTool = async (request: CallToolRequest): Promise<CallToolResult>
             if (n > 0) counts[e.completename ?? e.name] = n;
           }
         } else if (dimension === 'month') {
-          // Compute monthly buckets between date_from and date_to (or last 6 months).
-          const to = args.date_to ? new Date(args.date_to as string) : new Date();
-          const from = args.date_from ? new Date(args.date_from as string) : new Date(to.getFullYear(), to.getMonth() - 5, 1);
-          const cursor = new Date(from.getFullYear(), from.getMonth(), 1);
-          while (cursor <= to) {
-            const monthStart = new Date(cursor.getFullYear(), cursor.getMonth(), 1);
-            const monthEnd = new Date(cursor.getFullYear(), cursor.getMonth() + 1, 1);
-            const fmt = (d: Date) => d.toISOString().slice(0, 10) + ' 00:00:00';
-            const monthCriteria: SearchCriterion[] = [
-              { field: TICKET_FIELDS.date, searchtype: 'morethan', value: fmt(monthStart) },
-              { field: TICKET_FIELDS.date, searchtype: 'lessthan', value: fmt(monthEnd), link: 'AND' },
-            ];
+          const buckets = monthBuckets(args.date_from as string | undefined, args.date_to as string | undefined);
+          const dateField = await ticketField(client, 'date');
+          for (const bucket of buckets) {
+            const c = monthCriteria(bucket, dateField);
             if (args.entity_id !== undefined) {
-              monthCriteria.push({ field: TICKET_FIELDS.entity, searchtype: 'equals', value: args.entity_id as number, link: 'AND' });
+              c.push({ field: await ticketField(client, 'entity'), searchtype: 'equals', value: args.entity_id as number, link: 'AND' });
             }
-            const key = `${cursor.getFullYear()}-${String(cursor.getMonth() + 1).padStart(2, '0')}`;
-            counts[key] = await client.search.count('Ticket', monthCriteria);
-            cursor.setMonth(cursor.getMonth() + 1);
+            counts[bucket.key] = await client.search.count('Ticket', c);
           }
         } else {
           throw new McpError(ErrorCode.InvalidParams, `Unknown dimension: ${dimension}`);
@@ -1939,8 +1867,8 @@ const handleListResources = async (): Promise<ListResourcesResult> => ({
   resources: [
     { uri: 'glpi://tickets/open', name: 'Open Tickets', description: 'Tickets with status < 5', mimeType: 'application/json' },
     { uri: 'glpi://tickets/recent', name: 'Recent Tickets', description: 'Most recent tickets', mimeType: 'application/json' },
-    { uri: 'glpi://problems/open', name: 'Open Problems', description: 'Open problems', mimeType: 'application/json' },
-    { uri: 'glpi://changes/pending', name: 'Pending Changes', description: 'Pending changes', mimeType: 'application/json' },
+    { uri: 'glpi://problems/open', name: 'Open Problems', description: 'Problems not solved/closed (50 most recently updated)', mimeType: 'application/json' },
+    { uri: 'glpi://changes/pending', name: 'Pending Changes', description: 'Changes not applied/closed/in review/refused/cancelled (50 most recently updated)', mimeType: 'application/json' },
     { uri: 'glpi://computers', name: 'Computers', description: 'Computers', mimeType: 'application/json' },
     { uri: 'glpi://groups', name: 'Groups', description: 'Groups', mimeType: 'application/json' },
     { uri: 'glpi://categories', name: 'Categories', description: 'ITIL categories', mimeType: 'application/json' },
@@ -1968,14 +1896,12 @@ const handleReadResource = async (request: ReadResourceRequest): Promise<ReadRes
         return { contents: [{ uri, mimeType: 'application/json', text: JSON.stringify(tickets, null, 2) }] };
       }
       case 'glpi://problems/open': {
-        const problems = await client.getProblems({ range: '0-99' });
-        const open = (problems as any[]).filter((p) => p.status < 5);
-        return { contents: [{ uri, mimeType: 'application/json', text: JSON.stringify(open, null, 2) }] };
+        const open = await searchByStatuses(client, 'Problem', OPEN_PROBLEM_STATUSES);
+        return { contents: [{ uri, mimeType: 'application/json', text: JSON.stringify(open.data, null, 2) }] };
       }
       case 'glpi://changes/pending': {
-        const changes = await client.getChanges({ range: '0-99' });
-        const pending = (changes as any[]).filter((c) => c.status < 8);
-        return { contents: [{ uri, mimeType: 'application/json', text: JSON.stringify(pending, null, 2) }] };
+        const pending = await searchByStatuses(client, 'Change', PENDING_CHANGE_STATUSES);
+        return { contents: [{ uri, mimeType: 'application/json', text: JSON.stringify(pending.data, null, 2) }] };
       }
       case 'glpi://computers':
         return { contents: [{ uri, mimeType: 'application/json', text: JSON.stringify(await client.getComputers({ range: '0-99', is_deleted: false }), null, 2) }] };
@@ -2027,6 +1953,11 @@ async function shutdown(reason: string) {
 /** MCP over stdin/stdout — one client, the default (Claude Desktop/Code, Cursor). */
 async function startStdioTransport() {
   const server = createMcpServer();
+  // When the client goes away (stdin EOF / transport closed), close the GLPI
+  // session and exit instead of lingering as an orphan process.
+  server.onclose = () => void shutdown('stdio transport closed');
+  process.stdin.once('end', () => void shutdown('stdin ended'));
+  process.stdin.once('close', () => void shutdown('stdin closed'));
   await server.connect(new StdioServerTransport());
   console.error(`MCP GLPI Server v${SERVER_VERSION} running on stdio`);
 }

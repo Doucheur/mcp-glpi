@@ -73,6 +73,19 @@ export const TICKET_URGENCY: Record<number, string> = {
   5: 'Very high',
 };
 
+/**
+ * `CommonITILObject::getPriorityName()`: priority shares the 1..5 scale of
+ * urgency/impact but adds 6 = Major (set manually).
+ */
+export const TICKET_PRIORITY: Record<number, string> = {
+  1: 'Very low',
+  2: 'Low',
+  3: 'Medium',
+  4: 'High',
+  5: 'Very high',
+  6: 'Major',
+};
+
 export const STATUS_BY_ITEMTYPE: Record<ItilItemtype, Record<number, string>> = {
   Ticket: TICKET_STATUS,
   Problem: PROBLEM_STATUS,
