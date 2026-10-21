@@ -130,8 +130,8 @@ ship here, under **Fixed**. Upgrade guide: README, "Upgrading from 3.x".
   (build, lint, test, catalogue ceilings); `publish.yml` publishes to npm
   with provenance when a GitHub release is published (`NPM_TOKEN` secret).
   `prepublishOnly` runs build, lint and tests. The tarball ships `dist/`
-  without source maps, `README.md`, `CHANGELOG.md` and `LICENSE` (52 files,
-  98 kB).
+  without source maps, `README.md`, `CHANGELOG.md` and `LICENSE` (54 files,
+  112 kB).
 - Internals: one `McpServer` with a typed tool registry and one module per
   domain (`src/tools/`), name-derived safety annotations, an in-memory
   client/server test harness (`test/server.test.ts`).
