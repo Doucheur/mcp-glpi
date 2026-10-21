@@ -1,5 +1,250 @@
 # Changelog
 
+## 4.0.0 — 2026-10-21
+
+A smaller, stricter tool catalogue with compact outputs, prompts and resource
+templates. The configuration is unchanged; the 50 removed tool names keep
+working as hidden aliases. 3.5.0 was prepared but never published: its fixes
+ship here, under **Fixed**. Upgrade guide: README, "Upgrading from 3.x".
+
+### Breaking changes
+
+- **46 listed tools instead of 87.** Asset, KB, contract, supplier, location,
+  entity, project, document, group and category CRUD folds into
+  `glpi_list_items` / `glpi_get_item` / `glpi_create_item` /
+  `glpi_update_item` / `glpi_delete_item`; ticket followups, tasks,
+  solutions, validations and documents, and change/problem tasks, into
+  `glpi_get_ticket_timeline`; `glpi_list_tickets` into `glpi_search_tickets`;
+  `glpi_get_ticket_stats` into `glpi_tickets_stats_by`; `glpi_search_user`
+  into `glpi_find_user`; `glpi_search` into `glpi_search_v2`. The 50 removed
+  names stay callable as hidden aliases that map their arguments (listed
+  again with `GLPI_LEGACY_TOOLS=1`); the full table is in the README,
+  "Upgrading from 3.x". Aliases return the v4 output of their target and
+  accept every argument their v3 tool listed (`range`, `include_deleted`
+  answered with an explanatory `isError`, `with_*`, `force`...).
+- **Output shapes.** Compact JSON. Lists return
+  `{totalcount, start, count, next_start, items}`. Detail and list tools
+  return a per-itemtype compact projection (`verbose: true` for every field,
+  `fields` on `glpi_list_items`). HATEOAS `links` are gone. Text fields
+  (`content`, `answer`, `comment`, validation comments) are plain text capped
+  at `max_content_chars` (default 2000, `0` = no cap; `raw_html: true` keeps
+  the stored HTML). ITIL items carry `status_label`, `urgency_label`,
+  `priority_label`. Search rows use readable keys instead of option ids
+  (`requester_name`, `technician_name`, `category`, `entity`, `status`...).
+  The timeline returns `{itemtype, id, count, timeline: [{kind, date, ...}]}`.
+- **Strict arguments.** Unknown keys are rejected with a JSON-RPC
+  `InvalidParams` error instead of being ignored; ids must be positive
+  integers (numeric strings accepted). `include_deleted` is refused with an
+  `isError` result that explains it: it meant `is_deleted=1`, which lists
+  only trashed rows. Legacy parameters
+  (`range`, `force`, `parent_id` / `child_id` / `link_type`) are still
+  accepted but no longer listed.
+- **Defaults.** 25 rows per page on every list and search tool (max 500).
+  Open tickets (`open_only`, `glpi_list_overdue_tickets`,
+  `glpi://tickets/open`) are selected with status `notold`: `lessthan 5`
+  matched Solved tickets, because GLPI's status option is not ordered.
+- **Purge needs confirmation.** `purge: true` (or the legacy `force: true`)
+  on `glpi_delete_ticket` and `glpi_delete_item` needs `confirm_id` equal to
+  `id`; without `purge` the item goes to the trash. The
+  `glpi_delete_computer` alias keeps the v3 behaviour.
+- `glpi_create_user` has no `password` parameter, and `glpi_create_item` /
+  `glpi_update_item` refuse `password` / `password2` on `User`.
+- `glpi_upload_document` reads `file_path` only inside `GLPI_UPLOAD_DIR`
+  (see Security).
+- **Node.js 20 or later** (`engines.node >= 20`; v3: 18).
+- **Package entry.** `main`, `types` and `exports` point to the library
+  entry `dist/lib.js` instead of the CLI: importing `mcp-glpi` no longer
+  starts a server. The `mcp-glpi` bin (`dist/index.js`) is unchanged.
+
+### Added
+
+- Generic item tools `glpi_list_items`, `glpi_get_item` (`with`: softwares,
+  networkports, connections, disks, documents, infocoms, contracts, tickets,
+  problems, changes, logs), `glpi_create_item`, `glpi_update_item`,
+  `glpi_delete_item` over 24 itemtypes, including `Peripheral`, `Rack`,
+  `Enclosure`, `PDU` and `Profile`, which had no list or get tool in v3.
+  `glpi_update_item` restricts `Computer` and `Project` to their usual
+  fields, and `Ticket` / `Problem` / `Change` to the fields of
+  `glpi_update_ticket` / `glpi_update_problem` / `glpi_update_change` (same
+  lists in the code).
+- `glpi_get_ticket_timeline`: `kinds` (`followup`, `task`, `solution`,
+  `validation`, `document`; attached documents are new), `verbose`,
+  `max_content_chars`, `raw_html`.
+- ITIL-generic writes: `itemtype` (`Ticket`, `Change`, `Problem`) on
+  `glpi_add_followup`, `glpi_add_task` and `glpi_add_solution`.
+- `glpi_set_ticket_status`; `glpi_find_user` (login, last name or first
+  name, exact login first); `me` (connected user id and names) in
+  `glpi_get_session_info`.
+- `glpi_search_tickets`: `"me"` for `assigned_user_id`, `requester_user_id`
+  and the new `observer_user_id`, resolved once from the session's `glpiID`
+  and cached; the `my_open_tickets` prompt uses it. The actor filters use
+  GLPI's standard search-option ids (requester 4, technician 5, observer
+  66): the three options share one uid, so they cannot be resolved by name.
+- Entity and profile switching: `glpi_set_active_entity` (id or `"all"`,
+  `is_recursive`) and `glpi_set_active_profile`.
+- New parameters: `type` and `time_to_resolve` on `glpi_update_ticket`;
+  `begin` and `end` on `glpi_add_task`; `query` on
+  `glpi_list_search_options`; `is_deleted` on `glpi_search_tickets`; `start`
+  on `glpi_list_overdue_tickets`; `max_content_chars` / `raw_html` on the
+  tools that return text.
+- Five MCP prompts that spell out the tool sequence and ask the user before
+  any write: `triage_ticket`, `daily_report`, `draft_solution`,
+  `kb_from_ticket`, `my_open_tickets`. A prompt is registered only when
+  every tool it names is listed (one stderr note at startup names the
+  skipped ones); `glpi://tickets/*` need the `tickets` toolset,
+  `glpi://problems/open` and `glpi://changes/pending` the `itil` toolset.
+- Resource templates `glpi://ticket/{id}` (ticket and its last 10 timeline
+  entries, in the `glpi_get_ticket_timeline` shape), `glpi://kb/{id}` (article as plain text), `glpi://user/{id}`. The
+  fixed resources return list envelopes with compact rows.
+- `GLPI_TOOLSETS` (`tickets`, `itil`, `assets`, `users`, `kb`, `stats`,
+  `session`, `admin`; `core` = `glpi_list_items`, `glpi_get_item`,
+  `glpi_search_v2`, `glpi_count`, `glpi_list_search_options`,
+  `glpi_get_session_info` is always registered) and `GLPI_READ_ONLY=1`
+  (21 read-only tools plus the 2 session switches, which change the session
+  context, not GLPI data);
+  a disabled tool answers with the reason. `GLPI_LEGACY_TOOLS=1` lists the
+  aliases. HTTP mode warns at startup when `GLPI_READ_ONLY` is unset.
+- Server `instructions` (sent once per session): when to use which tool,
+  status / urgency / priority / type / role / task / validation codes, date
+  format, search criteria, paging and text rules.
+- GLPI and network failures come back as `isError` results with a hint line
+  per GLPI error code (rights, session, unknown item or itemtype, app token,
+  IP, timeout, unreachable GLPI). Argument problems found by a handler
+  (`purge` without `confirm_id`, upload outside `GLPI_UPLOAD_DIR`, `"me"`
+  unresolved, link relation, unknown search field or sort, refused update
+  field, `include_deleted`) are `isError` results too, starting with
+  `Invalid arguments for <tool>:`. Only arguments that fail the advertised
+  schema and unknown or disabled tools are protocol errors.
+- Global in-flight limit `GLPI_MAX_CONCURRENCY` (default 8).
+- Stricter numeric settings: `GLPI_TIMEOUT_MS` and `GLPI_MAX_CONCURRENCY`
+  must be positive integers and `GLPI_MAX_RETRIES` a non-negative one
+  (`0` = no retry); `0` timeout or concurrency, negative or non-numeric
+  values (`15s`) stop the server at startup with the variable name.
+- Library entry `src/lib.ts` (package `main` / `types` / `exports`), free of
+  side effects: `GlpiClient`, `GlpiHttp`, `GlpiSearch`, `SearchOptionsCache`,
+  `createMcpServer`, the tool catalogue, the ITIL code tables, error and
+  output helpers.
+- Tooling: `npm run lint` (ESLint 9 + typescript-eslint), `npm run
+  typecheck`, `npm run measure` (size of `tools/list`, full and read-only,
+  and of the instructions; a test pins the ceilings). CI on Node 20 and 22
+  (build, lint, test, catalogue ceilings); `publish.yml` publishes to npm
+  with provenance when a GitHub release is published (`NPM_TOKEN` secret).
+  `prepublishOnly` runs build, lint and tests. The tarball ships `dist/`
+  without source maps, `README.md`, `CHANGELOG.md` and `LICENSE` (54 files,
+  112 kB).
+- Internals: one `McpServer` with a typed tool registry and one module per
+  domain (`src/tools/`), name-derived safety annotations, an in-memory
+  client/server test harness (`test/server.test.ts`).
+
+### Fixed
+
+HTTP layer:
+
+- Writes are no longer replayed after an ambiguous failure: GET is retried
+  after a network error, a timeout or a 5xx; POST/PUT/DELETE only after
+  `ECONNREFUSED` / `ENOTFOUND` / `EAI_AGAIN` (request never sent). 429 is
+  retried for every method.
+- `Retry-After` and exponential backoff are capped at 30 s with ±20 % jitter;
+  `Retry-After` also accepts an HTTP date.
+- The response body is read inside the timeout window, so a stalled body
+  aborts instead of hanging.
+- `initSession` fails clearly when GLPI returns no `session_token`;
+  concurrent 401s refresh the session only if it is still the token the
+  failing request used; `killSession` uses the current token and never
+  re-authenticates.
+- An unreachable GLPI gives "Cannot reach GLPI (ECONNREFUSED)" and a hint
+  instead of "fetch failed".
+
+Search and data:
+
+- Search rows (`glpi_search_v2`, `glpi_search_tickets`,
+  `glpi_list_overdue_tickets`, `glpi_search_knowbase`, resources) have
+  readable keys: own column -> column name, joined column -> last two uid
+  segments (`itilcategory_completename`), clashes suffixed with the option
+  id. GLPI's `uid_cols` is not used: it merges requester and technician
+  under one key.
+- The search-options cache makes one fetch per itemtype at a time, does not
+  cache failures, and keeps raw entries only with `GLPI_DEBUG`.
+- `glpi_list_users` with the active filter returns the same shape as the
+  plain list and honours sort and order; this also fixes
+  `glpi_tickets_stats_by dimension=technician`.
+- User lookup by login is exact, including logins stored with trailing
+  spaces, and fails when several accounts share it (v3 returned the first
+  partial match).
+- The ticket status filter runs in GLPI (v3 `glpi_list_tickets` filtered one
+  page client-side and missed most matches).
+- `glpi://problems/open` (statuses 1, 2, 3, 4, 7, 8) and
+  `glpi://changes/pending` (1, 2, 3, 4, 7, 9, 10, 11, 12) use server-side
+  status criteria, newest update first; the v3 `status < 5` / `< 8` filters
+  dropped Accepted and Observed problems and misclassified changes.
+- `glpi_tickets_stats_by dimension=month`: month boundaries in local time
+  (UTC shifted them), tickets created at 00:00:00 on the 1st are counted, at
+  most 36 months.
+- `glpi_list_overdue_tickets` compares with local time and resolves
+  `time_to_resolve` dynamically; `glpi_search_tickets` resolves its Ticket
+  fields the same way.
+- Criteria with an unknown field name are rejected with the 5 closest option
+  names (they silently searched on field 0).
+- Ticket priority labels use the priority scale (6 = Major), not urgency.
+- `counts` on `glpi_get_ticket` / `glpi_get_change` / `glpi_get_problem` use
+  `range=0-0` and `Content-Range` instead of downloading every child.
+
+Writes and validation:
+
+- `glpi_link_tickets`: GLPI's `Ticket_Ticket` constants are 3 = SON_OF and
+  4 = PARENT_OF with `tickets_id_1` as the subject; v3 sent `link_type` 3
+  ("parent") as SON_OF and inverted the relation. New arguments `ticket_id`,
+  `other_ticket_id`, `relation` (`link`, `duplicate`, `child_of`,
+  `parent_of`); with the legacy `parent_id` / `child_id`, 3 and 4 both mean
+  "`parent_id` is the parent of `child_id`".
+- `glpi_assign_ticket` with both `user_id` and `group_id` creates both links
+  (the group was ignored) and returns both ids.
+- Required arguments and ids are checked before calling GLPI: a missing id
+  is `InvalidParams`, not `PUT Problem/undefined`.
+- Update tools reject unknown fields; the Computer update no longer forwards
+  arbitrary arguments.
+- `glpi_set_validation_status` accepts `"2"` / `"3"`.
+- `glpi_create_user` sends the e-mail as `_useremails`, GLPI's mechanism for
+  user addresses; the plain `email` field v3 sent was ignored.
+
+Other:
+
+- stdio: the server closes its GLPI session and exits when stdin ends or the
+  transport closes, instead of lingering as an orphan.
+
+### Performance
+
+- `tools/list` shrinks from 41.9k characters for 87 tools (v3) to 25.3k for
+  46 tools, 12.8k with `GLPI_READ_ONLY=1` (23 tools). Code tables, the date
+  format and the paging and text rules moved to the instructions (2.5k,
+  sent once); descriptions are at most 160 characters; listed schemas drop
+  `$schema`, `additionalProperties: false`, redundant minimums, defaults and
+  annotations equal to the MCP defaults. Validation is unaffected.
+- Default page of 25 rows and capped text fields keep results small.
+
+### Security
+
+- `glpi_upload_document`: `file_path` is read only when `GLPI_UPLOAD_DIR` is
+  set, and only for a regular file whose real path (symlinks resolved) is
+  inside it; 20 MB max. New inline alternative `content_base64` +
+  `filename` (bare file name only).
+- Purge needs `confirm_id` equal to `id`.
+- No password through this server: `glpi_create_user` has no `password`
+  parameter, and `password` / `password2` are refused on `User` items.
+- Writes are never retried after a timeout or a 5xx (see Fixed).
+- `GLPI_READ_ONLY=1` removes every write tool (the session switches stay);
+  HTTP mode warns when it is unset.
+
+### Credits
+
+- @Emanoel-Eijtec reported issue #9 (Change and Problem coverage), fixed in
+  3.4.0 and extended here to followups, tasks and solutions on changes and
+  problems.
+- @silenceroom contributed the Streamable HTTP transport (PR #10, shipped in
+  3.4.0) that Open WebUI uses.
+- @PatrickC09 contributed `glpi_upload_document` (PR #7, 3.3.0), hardened in
+  this release.
+
 ## 3.4.0 — 2026-10-21
 
 ### Fixed (issue #9 — Change / Problem coverage)
@@ -68,8 +313,8 @@
 
 ### Added
 
-- **`glpi_upload_document`**: upload a local file as a GLPI Document via
-  multipart `POST /Document` (`uploadManifest` + `filename[0]`), with an
+- **`glpi_upload_document`** (PR #7 by @PatrickC09): upload a local file
+  as a GLPI Document via multipart `POST /Document` (`uploadManifest` + `filename[0]`), with an
   optional `ticket_id` that links the document to the ticket in the same
   call. The link is declared inside the manifest (`itemtype`/`items_id`) so
   it also works for restricted profiles (e.g. Self-Service requesters) that

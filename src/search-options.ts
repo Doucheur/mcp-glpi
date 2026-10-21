@@ -20,8 +20,8 @@ export interface SearchOption {
   datatype?: string;
   uid?: string;
   available_searchtypes?: string[];
-  /** Raw entry from GLPI, kept for debugging / advanced cases. */
-  raw: Record<string, unknown>;
+  /** Raw entry from GLPI, kept only when GLPI_DEBUG is set (memory). */
+  raw?: Record<string, unknown>;
 }
 
 export interface SearchOptionsCatalogue {
@@ -38,6 +38,8 @@ const DEFAULT_TTL_MS = 60 * 60 * 1000; // 1 hour
 
 export class SearchOptionsCache {
   private cache: Map<string, SearchOptionsCatalogue> = new Map();
+  /** In-flight fetches, so concurrent callers share one listSearchOptions call. */
+  private inflight: Map<string, Promise<SearchOptionsCatalogue>> = new Map();
   private ttlMs: number;
 
   constructor(private http: GlpiHttp, ttlMs: number = DEFAULT_TTL_MS) {
@@ -48,13 +50,22 @@ export class SearchOptionsCache {
     const cached = this.cache.get(itemtype);
     if (cached && Date.now() - cached.fetchedAt < this.ttlMs) return cached;
 
-    const { data } = await this.http.request<Record<string, unknown>>(
-      `listSearchOptions/${itemtype}`
-    );
+    const pending = this.inflight.get(itemtype);
+    if (pending) return pending;
 
-    const catalogue = this.parse(itemtype, data);
-    this.cache.set(itemtype, catalogue);
-    return catalogue;
+    const fetching = (async () => {
+      const { data } = await this.http.request<Record<string, unknown>>(
+        `listSearchOptions/${itemtype}`
+      );
+      const catalogue = this.parse(itemtype, data ?? {});
+      this.cache.set(itemtype, catalogue);
+      return catalogue;
+    })().finally(() => {
+      // Dropped on success and on failure: a failed fetch is never cached.
+      this.inflight.delete(itemtype);
+    });
+    this.inflight.set(itemtype, fetching);
+    return fetching;
   }
 
   /** Invalidate cache for one itemtype, or all if no argument. */
@@ -91,6 +102,7 @@ export class SearchOptionsCache {
     const byUid = new Map<string, SearchOption>();
     const byName = new Map<string, SearchOption>();
     const byField = new Map<string, SearchOption>();
+    const keepRaw = Boolean(process.env.GLPI_DEBUG);
 
     for (const [key, value] of Object.entries(data)) {
       const id = parseInt(key, 10);
@@ -108,7 +120,7 @@ export class SearchOptionsCache {
         available_searchtypes: Array.isArray(entry.available_searchtypes)
           ? (entry.available_searchtypes as string[])
           : undefined,
-        raw: entry,
+        ...(keepRaw ? { raw: entry } : {}),
       };
 
       byId.set(id, option);

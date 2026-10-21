@@ -29,7 +29,7 @@ import {
   type Server as HttpServer,
   type ServerResponse,
 } from 'node:http';
-import type { Server } from '@modelcontextprotocol/sdk/server/index.js';
+import type { Transport } from '@modelcontextprotocol/sdk/shared/transport.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 
 export type TransportMode = 'stdio' | 'http';
@@ -200,10 +200,19 @@ export function parseTransportConfig(
 // HTTP server
 // ---------------------------------------------------------------------------
 
+/**
+ * Anything that can be attached to one transport and closed: the low-level
+ * `Server` and the high-level `McpServer` both qualify.
+ */
+export interface ConnectableMcpServer {
+  connect(transport: Transport): Promise<void>;
+  close(): Promise<void>;
+}
+
 export interface StartHttpMcpServerOptions {
   config: HttpTransportConfig;
   /** Builds a fresh MCP server; called once per POST. */
-  createServer: () => Server;
+  createServer: () => ConnectableMcpServer;
   /** Diagnostics sink — must not be stdout in stdio mode terms, but stderr. */
   log?: (message: string) => void;
 }
@@ -219,7 +228,7 @@ export interface RunningHttpServer {
 
 interface HandlerContext {
   config: HttpTransportConfig;
-  createServer: () => Server;
+  createServer: () => ConnectableMcpServer;
   log: (message: string) => void;
 }
 
