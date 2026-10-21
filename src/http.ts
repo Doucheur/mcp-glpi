@@ -4,7 +4,12 @@
  * - Single `request()` entry point used by every domain call.
  * - Auto re-authentication on 401 (expired session_token).
  * - Structured errors with HTTP status, GLPI error code/message, and full body.
- * - Optional retry with exponential backoff on 5xx.
+ * - Retries: GET is retried after a network error, a timeout or a 5xx.
+ *   POST/PUT/DELETE are retried only after a connection-level error raised
+ *   before the request was sent (ECONNREFUSED, ENOTFOUND, EAI_AGAIN), never
+ *   after a timeout or a 5xx (the write may have been applied). 429 is retried
+ *   for every method. Delays are capped at 30 s and get ±20 % jitter.
+ * - A process-wide semaphore caps the number of in-flight GLPI calls.
  */
 
 export interface GlpiHttpConfig {
@@ -17,8 +22,88 @@ export interface GlpiHttpConfig {
   maxRetries?: number;
   /** Initial backoff in ms (default 300). */
   retryBaseDelayMs?: number;
-  /** Request timeout in ms (default 15000). */
+  /** Request timeout in ms (default 15000), body read included. */
   timeoutMs?: number;
+  /** Max concurrent in-flight GLPI calls (default env GLPI_MAX_CONCURRENCY or 8). */
+  maxConcurrency?: number;
+}
+
+/** Upper bound of any retry delay (backoff or Retry-After). */
+export const MAX_RETRY_DELAY_MS = 30_000;
+
+/** Raised when a GLPI call (headers or body) exceeds `timeoutMs`. */
+export class GlpiTimeoutError extends Error {
+  constructor(timeoutMs: number, url: string) {
+    super(`Request timeout after ${timeoutMs}ms: ${url}`);
+    this.name = 'GlpiTimeoutError';
+  }
+}
+
+const PRE_SEND_ERROR_CODES = new Set(['ECONNREFUSED', 'ENOTFOUND', 'EAI_AGAIN']);
+
+/**
+ * True when a fetch failure happened before any byte of the request reached
+ * the server (DNS failure, connection refused), so replaying a write is safe.
+ * Node's fetch wraps the socket error in `TypeError('fetch failed', { cause })`,
+ * and the cause may itself be an AggregateError (happy eyeballs).
+ */
+export function isPreSendError(err: unknown, depth = 0): boolean {
+  if (!err || typeof err !== 'object' || depth > 4) return false;
+  const e = err as { code?: unknown; cause?: unknown; errors?: unknown; message?: unknown };
+  if (typeof e.code === 'string' && PRE_SEND_ERROR_CODES.has(e.code)) return true;
+  if (Array.isArray(e.errors) && e.errors.length > 0 && e.errors.every((x) => isPreSendError(x, depth + 1))) {
+    return true;
+  }
+  return isPreSendError(e.cause, depth + 1);
+}
+
+/** Apply the 30 s cap then ±20 % jitter. */
+export function retryDelay(baseMs: number, random: () => number = Math.random): number {
+  const capped = Math.min(Math.max(0, baseMs), MAX_RETRY_DELAY_MS);
+  const jitter = 1 + (random() * 0.4 - 0.2);
+  return Math.round(capped * jitter);
+}
+
+/** Parse a Retry-After header (delta-seconds or HTTP date) into ms. */
+export function parseRetryAfter(value: string | null, now: number = Date.now()): number | undefined {
+  if (!value) return undefined;
+  const trimmed = value.trim();
+  if (/^\d+(\.\d+)?$/.test(trimmed)) {
+    const seconds = Number(trimmed);
+    return seconds > 0 ? seconds * 1000 : undefined;
+  }
+  const at = Date.parse(trimmed);
+  if (Number.isNaN(at)) return undefined;
+  const delta = at - now;
+  return delta > 0 ? delta : undefined;
+}
+
+/** Minimal counting semaphore (FIFO). */
+class Semaphore {
+  private active = 0;
+  private waiters: Array<() => void> = [];
+  constructor(private readonly max: number) {}
+
+  async acquire(): Promise<void> {
+    if (this.active < this.max) {
+      this.active++;
+      return;
+    }
+    await new Promise<void>((resolve) => this.waiters.push(resolve));
+  }
+
+  release(): void {
+    const next = this.waiters.shift();
+    // Hand the slot straight to the next waiter (active count unchanged).
+    if (next) next();
+    else this.active--;
+  }
+}
+
+function defaultConcurrency(): number {
+  const raw = process.env.GLPI_MAX_CONCURRENCY;
+  const n = raw ? parseInt(raw, 10) : NaN;
+  return Number.isFinite(n) && n > 0 ? n : 8;
 }
 
 export interface GlpiRawError {
@@ -65,14 +150,35 @@ export interface RequestOptions {
   noSession?: boolean;
   /** Override auth header (used by initSession). */
   authHeader?: string;
+  /** Explicit Session-Token to send (used by killSession). */
+  sessionToken?: string;
   /** Capture response headers in the result. */
   withHeaders?: boolean;
+}
+
+interface FetchedResponse {
+  response: Response;
+  /** Body, read inside the timed region. */
+  body: string;
 }
 
 export interface RequestResult<T> {
   data: T;
   headers: Headers;
   status: number;
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function parseJson<T>(text: string): T {
+  if (!text) return undefined as unknown as T;
+  try {
+    return JSON.parse(text) as T;
+  } catch {
+    return text as unknown as T;
+  }
 }
 
 /** Debug logging to stderr (stdout is reserved for the MCP stdio transport). */
@@ -94,6 +200,7 @@ export class GlpiHttp {
    * leaking the sessions it abandoned.
    */
   private sessionInit: Promise<string> | null = null;
+  private readonly slots: Semaphore;
 
   constructor(config: GlpiHttpConfig) {
     this.config = {
@@ -103,6 +210,7 @@ export class GlpiHttp {
       ...config,
       url: config.url.replace(/\/$/, ''),
     };
+    this.slots = new Semaphore(this.config.maxConcurrency ?? defaultConcurrency());
   }
 
   get session(): string | null {
@@ -136,49 +244,65 @@ export class GlpiHttp {
     }
 
     const url = `${this.config.url}/apirest.php/initSession`;
-    const response = await this.fetchWithTimeout(url, { method: 'GET', headers });
+    const { response, body } = await this.fetchWithTimeout(url, { method: 'GET', headers });
 
     if (!response.ok) {
-      throw await this.buildError(response, 'GET', url);
+      throw this.buildError(response, body, 'GET', url);
     }
 
-    const data = (await response.json()) as { session_token: string };
-    this.sessionToken = data.session_token;
-    return this.sessionToken;
+    let token: unknown;
+    try {
+      token = (JSON.parse(body) as { session_token?: unknown })?.session_token;
+    } catch {
+      token = undefined;
+    }
+    if (typeof token !== 'string' || token.trim() === '') {
+      throw new Error(`GLPI initSession returned no session_token (HTTP ${response.status}): ${body.slice(0, 200)}`);
+    }
+    this.sessionToken = token;
+    return token;
   }
 
+  /**
+   * Close the current GLPI session. Uses the token we hold as-is: never
+   * re-authenticates just to log out (a 401 here means it is already dead).
+   */
   async killSession(): Promise<void> {
-    if (!this.sessionToken) return;
+    const token = this.sessionToken;
+    if (!token) return;
     try {
-      await this.request('killSession', { noSession: false });
+      await this.request('killSession', { noSession: true, sessionToken: token });
     } catch {
-      // ignore
+      // ignore: the session is gone or GLPI is unreachable
     }
-    this.sessionToken = null;
+    if (this.sessionToken === token) this.sessionToken = null;
   }
 
   private async ensureSession(): Promise<void> {
     if (!this.sessionToken) await this.initSession();
   }
 
-  private async fetchWithTimeout(
-    url: string,
-    init: RequestInit
-  ): Promise<Response> {
+  /**
+   * fetch + body read under one timer and one concurrency slot, so a server
+   * that sends headers then stalls the body cannot hang the caller forever.
+   */
+  private async fetchWithTimeout(url: string, init: RequestInit): Promise<FetchedResponse> {
     const timeoutMs = this.config.timeoutMs ?? 15000;
+    await this.slots.acquire();
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
-
     try {
       const response = await fetch(url, { ...init, signal: controller.signal });
-      clearTimeout(timeoutId);
-      return response;
+      const body = await response.text();
+      return { response, body };
     } catch (err) {
-      clearTimeout(timeoutId);
-      if (err instanceof Error && err.name === 'AbortError') {
-        throw new Error(`Request timeout after ${timeoutMs}ms: ${url}`);
+      if (controller.signal.aborted || (err instanceof Error && err.name === 'AbortError')) {
+        throw new GlpiTimeoutError(timeoutMs, url);
       }
       throw err;
+    } finally {
+      clearTimeout(timeoutId);
+      this.slots.release();
     }
   }
 
@@ -198,9 +322,9 @@ export class GlpiHttp {
     // For multipart, fetch sets Content-Type itself (with the boundary).
     if (!options.form) headers['Content-Type'] = 'application/json';
     if (this.config.appToken) headers['App-Token'] = this.config.appToken;
-    if (this.sessionToken && !options.authHeader) {
-      headers['Session-Token'] = this.sessionToken;
-    }
+    const explicitToken = options.sessionToken;
+    if (explicitToken) headers['Session-Token'] = explicitToken;
+    else if (this.sessionToken && !options.authHeader) headers['Session-Token'] = this.sessionToken;
     if (options.authHeader) headers['Authorization'] = options.authHeader;
 
     const queryString = this.buildQuery(options.query);
@@ -210,85 +334,76 @@ export class GlpiHttp {
     if (options.form) init.body = options.form;
     else if (options.json !== undefined) init.body = JSON.stringify(options.json);
 
+    const idempotent = method === 'GET';
     const maxRetries = this.config.maxRetries ?? 2;
     const baseDelay = this.config.retryBaseDelayMs ?? 300;
     let attempt = 0;
-    let lastError: GlpiError | undefined;
     let reauthAttempted = false;
 
-    while (attempt <= maxRetries) {
-      let response: Response;
+    for (;;) {
+      // Token actually sent with this attempt (for the concurrent-401 guard).
+      const usedToken = headers['Session-Token'];
+      let fetched: FetchedResponse;
       try {
-        response = await this.fetchWithTimeout(fullUrl, init);
+        fetched = await this.fetchWithTimeout(fullUrl, init);
       } catch (err) {
-        // Network error or timeout -> retry with backoff.
-        if (attempt < maxRetries) {
-          const delay = baseDelay * Math.pow(2, attempt);
+        const retryable = idempotent
+          ? true
+          : !(err instanceof GlpiTimeoutError) && isPreSendError(err);
+        if (retryable && attempt < maxRetries) {
+          const delay = retryDelay(baseDelay * Math.pow(2, attempt));
           debugLog(`${method} ${path} network error (${err instanceof Error ? err.message : err}), retry in ${delay}ms`);
-          await new Promise((r) => setTimeout(r, delay));
+          await sleep(delay);
           attempt++;
           continue;
         }
         throw err;
       }
+      const { response, body } = fetched;
 
       if (response.ok) {
-        const data = await this.parseBody<T>(response);
-        return { data, headers: response.headers, status: response.status };
+        return { data: parseJson<T>(body), headers: response.headers, status: response.status };
       }
 
-      // 401 -> session likely expired. Reauth once, retry once.
+      // 401 -> session likely expired. Reauth once, retry once. Only drop the
+      // session if nobody refreshed it since this request was sent; otherwise
+      // a concurrent caller already did and we just retry with the new token.
       if (response.status === 401 && !reauthAttempted && !options.noSession) {
         reauthAttempted = true;
-        this.sessionToken = null;
-        debugLog(`${method} ${path} -> 401, re-authenticating`);
-        await this.initSession();
+        if (this.sessionToken === usedToken) {
+          this.sessionToken = null;
+          debugLog(`${method} ${path} -> 401, re-authenticating`);
+        }
+        if (!this.sessionToken) await this.initSession();
         if (this.sessionToken) headers['Session-Token'] = this.sessionToken;
         continue;
       }
 
-      // 429 -> honour Retry-After header if present, else exponential backoff.
+      // 429 -> honour Retry-After (capped), else exponential backoff. Every
+      // method: a rate-limited request was not processed.
       if (response.status === 429 && attempt < maxRetries) {
-        const retryAfter = Number(response.headers.get('retry-after'));
-        const delay = retryAfter > 0 ? retryAfter * 1000 : baseDelay * Math.pow(2, attempt);
+        const retryAfter = parseRetryAfter(response.headers.get('retry-after'));
+        const delay = retryDelay(retryAfter ?? baseDelay * Math.pow(2, attempt));
         debugLog(`${method} ${path} -> 429 rate-limited, retry in ${delay}ms`);
-        await new Promise((r) => setTimeout(r, delay));
+        await sleep(delay);
         attempt++;
         continue;
       }
 
-      // 5xx -> exponential backoff retry.
-      if (response.status >= 500 && attempt < maxRetries) {
-        const delay = baseDelay * Math.pow(2, attempt);
+      // 5xx -> backoff retry, GET only (a write may already be applied).
+      if (response.status >= 500 && idempotent && attempt < maxRetries) {
+        const delay = retryDelay(baseDelay * Math.pow(2, attempt));
         debugLog(`${method} ${path} -> ${response.status}, retry in ${delay}ms`);
-        await new Promise((r) => setTimeout(r, delay));
+        await sleep(delay);
         attempt++;
         continue;
       }
 
-      lastError = await this.buildError(response, method, fullUrl);
-      throw lastError;
-    }
-
-    throw lastError ?? new Error('Unreachable');
-  }
-
-  private async parseBody<T>(response: Response): Promise<T> {
-    const text = await response.text();
-    if (!text) return undefined as unknown as T;
-    try {
-      return JSON.parse(text) as T;
-    } catch {
-      return text as unknown as T;
+      throw this.buildError(response, body, method, fullUrl);
     }
   }
 
-  private async buildError(
-    response: Response,
-    method: string,
-    url: string
-  ): Promise<GlpiError> {
-    const body = await response.text();
+  private buildError(response: Response, body: string, method: string, url: string): GlpiError {
     let glpiCode: string | undefined;
     let glpiMessage: string | undefined;
     try {
