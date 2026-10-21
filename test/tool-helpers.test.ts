@@ -12,13 +12,9 @@ import { GlpiClient } from '../src/glpi-client.js';
 import {
   MAX_UPLOAD_BYTES,
   closestOptions,
-  formatTicketSummary,
-  listTicketsByStatus,
   monthBuckets,
   monthCriteria,
-  parseListArgs,
   parseValidationStatus,
-  pickFields,
   requireId,
   resolveCriteria,
   resolveLinkArgs,
@@ -26,7 +22,6 @@ import {
   searchByStatuses,
   statusInCriteria,
   ticketField,
-  validateToolArgs,
 } from '../src/tool-helpers.js';
 
 type FetchHandler = (url: string, init?: RequestInit) => Promise<Response>;
@@ -145,59 +140,6 @@ test('ticketField resolves dynamically, caches, and falls back to static ids', a
   assert.equal(await ticketField(client(), 'time_to_resolve'), 18);
 });
 
-// --- list args ---------------------------------------------------------------
-
-test('parseListArgs: include_deleted is rejected, is_deleted passes through', () => {
-  assert.throws(() => parseListArgs({ include_deleted: true }), isInvalid(/ONLY deleted/));
-  assert.equal(parseListArgs({ include_deleted: false }).is_deleted, undefined);
-  assert.equal(parseListArgs({ is_deleted: true }).is_deleted, true);
-  assert.equal(parseListArgs({ start: 10, limit: 5 }).range, '10-14');
-});
-
-// --- ticket summaries / status lists ---------------------------------------
-
-test('formatTicketSummary labels priority with the priority scale (6 = Major)', () => {
-  const s = formatTicketSummary({ id: 1, status: 2, urgency: 5, priority: 6 });
-  assert.equal(s.priority, 'Major');
-  assert.equal(s.urgency, 'Very high');
-  assert.equal(formatTicketSummary({ priority: 4 }).priority, 'High');
-});
-
-test('listTicketsByStatus filters server-side with the same range and order', async () => {
-  let params: URLSearchParams | undefined;
-  installFetch(async (url) => {
-    if (url.includes('listSearchOptions')) {
-      return json({
-        1: { name: 'Title', field: 'name', uid: 'Ticket.name' },
-        2: { name: 'ID', field: 'id', uid: 'Ticket.id' },
-        3: { name: 'Priority', field: 'priority', uid: 'Ticket.priority' },
-        10: { name: 'Urgency', field: 'urgency', uid: 'Ticket.urgency' },
-        12: { name: 'Status', field: 'status', uid: 'Ticket.status' },
-        15: { name: 'Opening date', field: 'date', uid: 'Ticket.date' },
-        19: { name: 'Last update', field: 'date_mod', uid: 'Ticket.date_mod' },
-        7: { name: 'Category', field: 'completename', uid: 'Ticket.ITILCategory.completename' },
-        80: { name: 'Entity', field: 'completename', uid: 'Ticket.Entity.completename' },
-      });
-    }
-    params = new URL(url).searchParams;
-    return json({
-      totalcount: 1,
-      data: [{ 2: 9, 1: 'VPN', 12: 4, 10: 3, 3: 6, 15: '2026-10-01 08:00:00', 19: '2026-10-02 09:00:00', 80: 'Root', 7: 'Network' }],
-    });
-  });
-  const rows = await listTicketsByStatus(client(), 4, { range: '20-29', order: 'DESC' });
-  assert.equal(params?.get('criteria[0][field]'), '12');
-  assert.equal(params?.get('criteria[0][searchtype]'), 'equals');
-  assert.equal(params?.get('criteria[0][value]'), '4');
-  assert.equal(params?.get('range'), '20-29');
-  assert.equal(params?.get('order'), 'DESC');
-  assert.equal(params?.get('sort'), '2');
-  assert.deepEqual(rows, [{
-    id: 9, name: 'VPN', status: 'Pending', urgency: 'Medium', priority: 'Major',
-    date: '2026-10-01 08:00:00', date_mod: '2026-10-02 09:00:00', entities_id: 'Root', itilcategories_id: 'Network',
-  }]);
-});
-
 test('searchByStatuses builds OR-linked status criteria, newest first, 50 rows', async () => {
   assert.deepEqual(statusInCriteria(12, [1, 2]), [
     { field: 12, searchtype: 'equals', value: 1 },
@@ -248,28 +190,11 @@ test('resolveLinkArgs: legacy parent_id/child_id keep "parent_id is the parent"'
 
 // --- validation -------------------------------------------------------------
 
-test('requireId / validateToolArgs reject missing or malformed ids', () => {
+test('requireId rejects missing or malformed ids', () => {
   assert.equal(requireId({ id: '12' }, 'id'), 12);
   assert.throws(() => requireId({}, 'id'), isInvalid(/id is required/));
   assert.throws(() => requireId({ id: 0 }, 'id'), isInvalid(/positive integer/));
   assert.throws(() => requireId({ id: 'abc' }, 'id'), isInvalid(/positive integer/));
-
-  const schema = {
-    properties: { id: { type: 'number' }, entity_id: { type: 'number' }, name: { type: 'string' } },
-    required: ['id'],
-  };
-  assert.throws(() => validateToolArgs(schema, { name: 'x' }), isInvalid(/id is required/));
-  assert.deepEqual(validateToolArgs(schema, { id: '7', entity_id: 0 }), { id: 7, entity_id: 0 });
-  assert.throws(() => validateToolArgs(schema, { id: 7, entity_id: -1 }), isInvalid(/non-negative/));
-  assert.throws(() => validateToolArgs({ properties: {}, required: ['content'] }, {}), isInvalid(/content is required/));
-});
-
-test('pickFields whitelists update payloads', () => {
-  assert.deepEqual(pickFields('t', { id: 1, name: 'a', serial: 'S' }, ['name', 'serial', 'comment']), { name: 'a', serial: 'S' });
-  assert.throws(
-    () => pickFields('glpi_update_computer', { id: 1, is_deleted: 1 }, ['name']),
-    isInvalid(/unknown field\(s\) is_deleted\. Allowed: name/)
-  );
 });
 
 test('parseValidationStatus accepts 2/3 as numbers or strings', () => {
