@@ -6,21 +6,15 @@
 import { readFile, realpath, stat } from 'node:fs/promises';
 import { basename, extname, isAbsolute, relative, resolve } from 'node:path';
 import { ErrorCode, McpError } from '@modelcontextprotocol/sdk/types.js';
-import type { GlpiClient, ListOptions, TicketRelation } from './glpi-client.js';
+import type { GlpiClient, TicketRelation } from './glpi-client.js';
 import type { SearchCriterion, SearchLink, SearchType } from './search.js';
 import type { SearchOptionsCatalogue } from './search-options.js';
-import { TICKET_PRIORITY, TICKET_STATUS, TICKET_URGENCY } from './itil.js';
 
 const invalid = (message: string) => new McpError(ErrorCode.InvalidParams, message);
 
 // ---------------------------------------------------------------------------
 // Argument validation
 // ---------------------------------------------------------------------------
-
-/** True for parameter names that carry a GLPI id ("id", "ticket_id", ...). */
-export function isIdParam(key: string): boolean {
-  return key === 'id' || key.endsWith('_id');
-}
 
 /**
  * Read a positive integer id from the arguments. Accepts numeric strings
@@ -37,115 +31,11 @@ export function requireId(args: Record<string, unknown>, key: string, min = 1): 
   return n;
 }
 
-interface JsonSchemaLike {
-  properties?: Record<string, unknown>;
-  required?: string[];
-}
-
-/**
- * Generic argument check driven by a tool's JSON schema: every `required`
- * key must be present; every id-like numeric property (`id`, `*_id`) must be
- * an integer — >= 1 when required, >= 0 when optional (entity 0 is the root
- * entity, 0 clears a dropdown). Numeric strings are coerced. Returns a copy of
- * `args` with the coerced ids.
- */
-export function validateToolArgs(
-  schema: JsonSchemaLike,
-  args: Record<string, unknown>
-): Record<string, unknown> {
-  const out = { ...args };
-  for (const key of schema.required ?? []) {
-    const v = out[key];
-    if (v === undefined || v === null || v === '') throw invalid(`${key} is required`);
-  }
-  for (const [key, prop] of Object.entries(schema.properties ?? {})) {
-    if (!isIdParam(key)) continue;
-    const type = (prop as { type?: unknown })?.type;
-    if (type !== 'number' && type !== 'integer') continue;
-    if (out[key] === undefined || out[key] === null) continue;
-    out[key] = requireId(out, key, schema.required?.includes(key) ? 1 : 0);
-  }
-  return out;
-}
-
-/**
- * Whitelist the fields of an update/create payload. Unknown fields are an
- * error (listing the allowed ones) rather than being forwarded to GLPI.
- */
-export function pickFields(
-  tool: string,
-  args: Record<string, unknown>,
-  allowed: readonly string[],
-  ignore: readonly string[] = ['id']
-): Record<string, unknown> {
-  const unknown = Object.keys(args).filter((k) => !allowed.includes(k) && !ignore.includes(k));
-  if (unknown.length > 0) {
-    throw invalid(`${tool}: unknown field(s) ${unknown.join(', ')}. Allowed: ${allowed.join(', ')}`);
-  }
-  const out: Record<string, unknown> = {};
-  for (const k of allowed) if (args[k] !== undefined) out[k] = args[k];
-  return out;
-}
-
 /** `status` for glpi_set_validation_status: 2 or 3, numeric strings accepted. */
 export function parseValidationStatus(value: unknown): 2 | 3 {
   const n = typeof value === 'string' && /^\s*\d+\s*$/.test(value) ? Number(value) : value;
   if (n !== 2 && n !== 3) throw invalid(`status must be 2 (granted) or 3 (refused), got ${JSON.stringify(value)}`);
   return n;
-}
-
-// ---------------------------------------------------------------------------
-// List arguments
-// ---------------------------------------------------------------------------
-
-/**
- * Parse common list-tool arguments into a ListOptions.
- *
- * Accepts (in order of precedence):
- *   - `range`: "START-END" string passed through as-is
- *   - `start` + `limit`: assembled into range
- *   - `limit` alone: range = "0-{limit-1}" (backward-compat with v2)
- *
- * `is_deleted: true` lists ONLY deleted (trashed) rows — that is GLPI's
- * semantics. The former `include_deleted` alias mapped onto it and silently
- * returned only deleted rows, so it is rejected now.
- */
-export function parseListArgs(args: Record<string, unknown> | undefined): ListOptions {
-  const opts: ListOptions = {};
-  if (!args) return { range: '0-49', expand_dropdowns: true };
-
-  if (args.include_deleted === true) {
-    throw invalid(
-      'include_deleted is not supported: GLPI cannot list deleted and active rows together. ' +
-        'Use is_deleted=true to list ONLY deleted (trashed) rows.'
-    );
-  }
-
-  if (typeof args.range === 'string') {
-    opts.range = args.range;
-  } else if (args.start !== undefined || args.limit !== undefined) {
-    const start = (args.start as number) ?? 0;
-    const limit = (args.limit as number) ?? 50;
-    opts.range = `${start}-${start + limit - 1}`;
-  } else {
-    opts.range = '0-49';
-  }
-
-  if (args.sort !== undefined) opts.sort = args.sort as number | string;
-  if (args.order) opts.order = args.order as 'ASC' | 'DESC';
-  if (args.is_deleted !== undefined) opts.is_deleted = args.is_deleted as boolean;
-  // Default expand_dropdowns to true for human-readable output.
-  opts.expand_dropdowns = args.expand_dropdowns === false ? false : true;
-  return opts;
-}
-
-/** "10-29" -> { start: 10, limit: 20 }. */
-export function rangeToStartLimit(range: string | undefined, fallbackLimit = 50): { start: number; limit: number } {
-  const m = range?.match(/^\s*(\d+)\s*-\s*(\d+)\s*$/);
-  if (!m) return { start: 0, limit: fallbackLimit };
-  const start = parseInt(m[1], 10);
-  const end = parseInt(m[2], 10);
-  return { start, limit: Math.max(1, end - start + 1) };
 }
 
 // ---------------------------------------------------------------------------
@@ -293,82 +183,6 @@ export function ticketField(client: GlpiClient, key: TicketFieldKey): Promise<nu
     : Promise.resolve(fallback);
   perClient.set(key, resolved);
   return resolved;
-}
-
-// ---------------------------------------------------------------------------
-// Ticket summaries / status lists
-// ---------------------------------------------------------------------------
-
-export function formatTicketSummary(t: any) {
-  return {
-    id: t.id,
-    name: t.name,
-    status: TICKET_STATUS[t.status] ?? t.status,
-    urgency: TICKET_URGENCY[t.urgency] ?? t.urgency,
-    priority: TICKET_PRIORITY[t.priority] ?? t.priority,
-    date: t.date,
-    date_mod: t.date_mod,
-    entities_id: t.entities_id,
-    itilcategories_id: t.itilcategories_id,
-  };
-}
-
-/** Columns of a ticket search row needed by formatTicketSummary. */
-const SUMMARY_COLUMNS: Array<[TicketFieldKey, string]> = [
-  ['id', 'id'],
-  ['name', 'name'],
-  ['status', 'status'],
-  ['urgency', 'urgency'],
-  ['priority', 'priority'],
-  ['date', 'date'],
-  ['date_mod', 'date_mod'],
-  ['entity', 'entity'],
-  ['category', 'category'],
-];
-
-/**
- * glpi_list_tickets with a status: filter server-side through search/Ticket
- * (the GET list cannot filter on status, and filtering one page client-side
- * missed most matches). Same range/order and summary shape as the GET path.
- */
-export async function listTicketsByStatus(
-  client: GlpiClient,
-  status: number,
-  opts: ListOptions
-): Promise<ReturnType<typeof formatTicketSummary>[]> {
-  const { start, limit } = rangeToStartLimit(opts.range);
-  const ids = await Promise.all(SUMMARY_COLUMNS.map(([k]) => ticketField(client, k)));
-  let sort: number;
-  if (opts.sort === undefined) sort = ids[0];
-  else if (typeof opts.sort === 'number' || /^\d+$/.test(String(opts.sort))) sort = Number(opts.sort);
-  else {
-    const resolved = await client.searchOptions.resolveField('Ticket', String(opts.sort));
-    if (resolved === undefined) throw invalid(`sort: unknown Ticket column "${opts.sort}"`);
-    sort = resolved;
-  }
-  const result = await client.search.search<Record<string, unknown>>('Ticket', {
-    criteria: [{ field: await ticketField(client, 'status'), searchtype: 'equals', value: status }],
-    forcedisplay: ids,
-    start,
-    limit,
-    sort,
-    order: opts.order ?? 'DESC',
-    expandDropdowns: opts.expand_dropdowns !== false,
-  });
-  return result.data.map((row) => {
-    const pick = (i: number) => row[SUMMARY_COLUMNS[i][1]] ?? row[String(ids[i])];
-    return formatTicketSummary({
-      id: pick(0),
-      name: pick(1),
-      status: pick(2),
-      urgency: pick(3),
-      priority: pick(4),
-      date: pick(5),
-      date_mod: pick(6),
-      entities_id: pick(7),
-      itilcategories_id: pick(8),
-    });
-  });
 }
 
 /**

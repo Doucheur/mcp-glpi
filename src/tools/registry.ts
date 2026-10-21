@@ -161,26 +161,156 @@ export function selectTools(defs: readonly ToolDef[], aliases: readonly AliasDef
 // Registration
 // ---------------------------------------------------------------------------
 
-const schemaCache = new WeakMap<object, { zod: z.ZodObject<ZodRawShape>; json: Record<string, unknown> }>();
+type Json = Record<string, unknown>;
 
-/** Strict zod object + its JSON schema, built once per definition. */
+/**
+ * Parameters whose advertised JSON schema differs from the zod one used for
+ * validation: `null` = accepted but not listed (`hidden()`), otherwise the
+ * JSON schema listed instead of the generated one (`advertisedAs()`).
+ */
+const advertised = new WeakMap<z.ZodTypeAny, Json | null>();
+
+/** Accepted by the tool, not listed in tools/list (legacy v3 parameter names). */
+export function hidden<T extends z.ZodTypeAny>(schema: T): T {
+  advertised.set(schema, null);
+  return schema;
+}
+
+/** Validated by `schema`, listed as `json` (e.g. a long enum listed once elsewhere). */
+export function advertisedAs<T extends z.ZodTypeAny>(schema: T, json: Json): T {
+  advertised.set(schema, json);
+  return schema;
+}
+
+/**
+ * Trim the advertised JSON schema to what helps a model choose arguments.
+ * Validation is unaffected: arguments are checked against the strict zod
+ * object, not against this schema.
+ *   - drops $schema, `additionalProperties: false`, empty `required`;
+ *   - drops `minLength: 1` / `minItems: 1` (non-empty is implied) and
+ *     `minimum: 0` (ids, offsets and caps are never negative);
+ *   - writes integer `exclusiveMinimum: n` as `minimum: n + 1`;
+ *   - drops descriptions on anyOf/oneOf branches when the parent has one;
+ *   - drops `default` when the description already states the default;
+ *   - merges an anyOf of bare types into a type list.
+ * Keeps type, enum, const, required, other minimum/maximum, items.
+ */
+export function slimJsonSchema(node: unknown): unknown {
+  if (Array.isArray(node)) return node.map(slimJsonSchema);
+  if (!node || typeof node !== 'object') return node;
+  const out: Json = {};
+  for (const [key, value] of Object.entries(node as Json)) {
+    if (key === '$schema') continue;
+    if (key === 'additionalProperties' && value === false) continue;
+    if (key === 'required' && Array.isArray(value) && value.length === 0) continue;
+    if ((key === 'minLength' || key === 'minItems') && value === 1) continue;
+    // Ids, offsets and caps are never negative: `minimum: 0` tells nothing.
+    if (key === 'minimum' && value === 0) continue;
+    // Positive integers: `minimum: 1` says the same as `exclusiveMinimum: 0`, shorter.
+    if (key === 'exclusiveMinimum' && typeof value === 'number' && (node as Json).type === 'integer') {
+      out.minimum = Math.floor(value) + 1;
+      continue;
+    }
+    if (key === 'properties' && value && typeof value === 'object') {
+      const props: Json = {};
+      for (const [name, prop] of Object.entries(value as Json)) props[name] = slimJsonSchema(prop);
+      out[key] = props;
+      continue;
+    }
+    out[key] = slimJsonSchema(value);
+  }
+  const description = typeof out.description === 'string' ? out.description : undefined;
+  if (description) {
+    for (const key of ['anyOf', 'oneOf'] as const) {
+      const branches = out[key];
+      if (Array.isArray(branches)) {
+        out[key] = branches.map((b) => {
+          if (!b || typeof b !== 'object' || !('description' in b)) return b;
+          const { description: _d, ...rest } = b as Json;
+          return rest;
+        });
+      }
+    }
+    if ('default' in out && /default/i.test(description)) delete out.default;
+  }
+  // anyOf of bare types -> one type list: {"type":["integer","string"]}.
+  const anyOf = out.anyOf;
+  if (
+    Array.isArray(anyOf) &&
+    anyOf.every((b) => b && typeof b === 'object' && Object.keys(b).length === 1 && typeof (b as Json).type === 'string')
+  ) {
+    delete out.anyOf;
+    out.type = anyOf.map((b) => (b as Json).type);
+  }
+  return out;
+}
+
+/** "glpi_list_items" -> "list items": a title equal to this adds nothing. */
+const readableName = (name: string) => name.replace(/^glpi_/, '').replace(/_/g, ' ');
+const normalize = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+
+/** The title, unless it only restates the tool name. */
+export function usefulTitle(name: string, title: string): string | undefined {
+  return normalize(title) === normalize(readableName(name)) ? undefined : title;
+}
+
+/** MCP defaults: readOnlyHint false, destructiveHint true, idempotentHint false, openWorldHint true. */
+const ANNOTATION_DEFAULTS: Required<ToolAnnotations> = {
+  readOnlyHint: false,
+  destructiveHint: true,
+  idempotentHint: false,
+  openWorldHint: true,
+};
+
+/**
+ * Annotations as listed: keys equal to the MCP default are omitted, and so is
+ * openWorldHint. It is false for every tool (only the configured GLPI is
+ * reached), but a missing hint means "open world", the cautious reading, and
+ * no client relaxes anything on false: 46 copies of it are not worth sending.
+ */
+export function listedAnnotations(annotations: ToolAnnotations): ToolAnnotations {
+  const out: ToolAnnotations = {};
+  for (const [key, value] of Object.entries(annotations) as Array<[keyof ToolAnnotations, boolean | undefined]>) {
+    if (value === undefined || value === ANNOTATION_DEFAULTS[key] || key === 'openWorldHint') continue;
+    // destructive/idempotent hints are meaningless on read-only tools.
+    if (annotations.readOnlyHint && (key === 'destructiveHint' || key === 'idempotentHint')) continue;
+    out[key] = value;
+  }
+  return out;
+}
+
+const schemaCache = new WeakMap<object, { zod: z.ZodObject<ZodRawShape>; json: Json }>();
+
+/** Strict zod object + its advertised JSON schema, built once per definition. */
 function schemasOf(def: ToolDef) {
   let cached = schemaCache.get(def);
   if (!cached) {
     const zod = z.object(def.inputSchema).strict();
-    const json = zodToJsonSchema(zod, { strictUnions: true, pipeStrategy: 'input', $refStrategy: 'none' }) as Record<
-      string,
-      unknown
-    >;
-    delete json.$schema;
-    cached = { zod, json };
+    const raw = zodToJsonSchema(zod, { strictUnions: true, pipeStrategy: 'input', $refStrategy: 'none' }) as Json;
+    const properties = raw.properties as Json | undefined;
+    if (properties) {
+      for (const [name, schema] of Object.entries(def.inputSchema)) {
+        const listedAs = advertised.get(schema);
+        if (listedAs === null) delete properties[name];
+        else if (listedAs) properties[name] = listedAs;
+      }
+      if (Array.isArray(raw.required)) {
+        raw.required = raw.required.filter((name) => typeof name === 'string' && name in properties);
+      }
+    }
+    cached = { zod, json: slimJsonSchema(raw) as Json };
     schemaCache.set(def, cached);
   }
   return cached;
 }
 
+/** JSON schema advertised for a tool (for tests and measurements). */
+export function listedInputSchema(def: ToolDef): Json {
+  return schemasOf(def).json;
+}
+
 const ALIAS_SCHEMA = z.object({}).passthrough();
-const ALIAS_JSON_SCHEMA = { type: 'object', additionalProperties: true };
+const ALIAS_JSON_SCHEMA = { type: 'object' };
 
 function formatZodError(error: z.ZodError): string {
   return error.issues
@@ -257,21 +387,24 @@ export function registerAll(
     );
   }
 
-  const listed: ListToolsResult['tools'] = selection.tools.map((def) => ({
-    name: def.name,
-    title: def.title,
-    description: def.description,
-    inputSchema: schemasOf(def).json as ListToolsResult['tools'][number]['inputSchema'],
-    annotations: annotationsOf(def),
-  }));
+  type ListedTool = ListToolsResult['tools'][number];
+  const listed: ListToolsResult['tools'] = selection.tools.map((def) => {
+    const title = usefulTitle(def.name, def.title);
+    return {
+      name: def.name,
+      ...(title ? { title } : {}),
+      description: def.description,
+      inputSchema: schemasOf(def).json as ListedTool['inputSchema'],
+      annotations: listedAnnotations(annotationsOf(def)),
+    };
+  });
   if (options.legacyTools) {
     for (const { alias, target } of aliasByName.values()) {
       listed.push({
         name: alias.name,
-        title: `${target.title} (legacy name)`,
         description: `Deprecated v3 name, routed to ${target.name}. Prefer ${target.name}.`,
-        inputSchema: ALIAS_JSON_SCHEMA as ListToolsResult['tools'][number]['inputSchema'],
-        annotations: annotationsOf(target),
+        inputSchema: ALIAS_JSON_SCHEMA as ListedTool['inputSchema'],
+        annotations: listedAnnotations(annotationsOf(target)),
       });
     }
   }

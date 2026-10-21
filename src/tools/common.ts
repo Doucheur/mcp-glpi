@@ -1,65 +1,105 @@
 /**
  * Schema building blocks and small helpers shared by the tool modules.
+ *
+ * Parameter descriptions stay short: code tables (status, urgency,
+ * priority...), the date format, paging and text-capping rules live once in
+ * the server instructions (server.ts), and descriptions point there.
  */
 
 import { z } from 'zod';
 import type { ListOptions } from '../glpi-client.js';
-import { DEFAULT_LIST_LIMIT, pageLimit } from '../output.js';
+import { pageLimit } from '../output.js';
+import { hidden } from './registry.js';
+
+export { hidden };
 
 /** Numeric strings ("12") are accepted for numbers, as in v3. */
 const numericString = (v: unknown) => (typeof v === 'string' && /^\s*\d+\s*$/.test(v) ? Number(v) : v);
 
+/**
+ * Descriptions are optional: a parameter whose name already says what it is
+ * (ticket_id on a ticket tool, email...) is listed without one.
+ */
+const described = <T extends z.ZodTypeAny>(schema: T, description?: string): T =>
+  description ? (schema.describe(description) as T) : schema;
+
 /** Required positive integer id. */
-export const id = (description: string) => z.preprocess(numericString, z.number().int().positive()).describe(description);
+export const id = (description?: string) =>
+  described(z.preprocess(numericString, z.number().int().positive()), description);
 
 /** Optional id where 0 is meaningful (root entity, "no category"). */
-export const optId = (description: string) =>
-  z.preprocess(numericString, z.number().int().nonnegative()).optional().describe(description);
+export const optId = (description?: string) =>
+  described(z.preprocess(numericString, z.number().int().nonnegative()).optional(), description);
 
-export const optInt = (description: string) => z.preprocess(numericString, z.number().int()).optional().describe(description);
+export const optInt = (description?: string) => described(z.preprocess(numericString, z.number().int()).optional(), description);
 
-export const optBool = (description: string) => z.boolean().optional().describe(description);
-export const optStr = (description: string) => z.string().optional().describe(description);
+export const optBool = (description?: string) => described(z.boolean().optional(), description);
+export const optStr = (description?: string) => described(z.string().optional(), description);
 
-export const STATUS_TICKET_DESC = 'Ticket status: 1 New, 2 Processing (assigned), 3 Processing (planned), 4 Pending, 5 Solved, 6 Closed';
-export const STATUS_PROBLEM_DESC =
-  'Problem status: 1 New, 2 Processing (assigned), 3 Processing (planned), 4 Pending, 5 Solved, 6 Closed, 7 Accepted, 8 Under observation';
-export const STATUS_CHANGE_DESC =
-  'Change status: 1 New, 9 Evaluation, 10 Approval, 7 Accepted, 4 Pending, 11 Testing, 12 Qualification, 5 Applied, 8 Review, 6 Closed, 13 Refused, 14 Cancelled';
-export const URGENCY_DESC = '1 Very low, 2 Low, 3 Medium, 4 High, 5 Very high';
-export const PRIORITY_DESC = '1 Very low, 2 Low, 3 Medium, 4 High, 5 Very high, 6 Major';
-export const DATE_DESC = "'YYYY-MM-DD HH:MM:SS' (or 'YYYY-MM-DD'), GLPI server time";
+// ---- pointers to the code tables of the instructions --------------------------
 
-export const itilItemtype = z
-  .enum(['Ticket', 'Change', 'Problem'])
-  .optional()
-  .describe('ITIL object type (default Ticket). Ids are per itemtype.');
+export const STATUS_TICKET_DESC = 'Status (instructions)';
+export const STATUS_PROBLEM_DESC = STATUS_TICKET_DESC;
+export const STATUS_CHANGE_DESC = STATUS_TICKET_DESC;
+export const URGENCY_DESC = 'Urgency 1-5';
+export const IMPACT_DESC = 'Impact 1-5';
+export const PRIORITY_DESC = 'Priority 1-6';
+/** Suffix for date parameters; the format is in the instructions. */
+export const DATE = '(date)';
+
+export const itilItemtype = z.enum(['Ticket', 'Change', 'Problem']).optional().describe('Default Ticket');
+
+// ---- shared list / output parameters ----------------------------------------
+//
+// Defined once here and explained once, in the instructions ("Lists return
+// ...", "Text fields ..."): their per-tool description would repeat the
+// same sentence in a dozen tools. SHARED_PARAMS names them for the test
+// that checks every advertised parameter is described somewhere.
+
+export const SHARED_PARAMS = [
+  'start', 'limit', 'sort', 'order', 'is_deleted', 'expand_dropdowns', 'fetch_all', 'max_rows',
+  'fields', 'verbose', 'max_content_chars', 'raw_html',
+] as const;
+
+export const verbose = z.boolean().optional();
+export const fields = z.array(z.string()).min(1).optional();
 
 /** max_content_chars / raw_html. */
 export const textShape = {
-  max_content_chars: z
-    .number()
-    .int()
-    .min(0)
-    .optional()
-    .describe('Max chars per text field (default 2000, 0 = no cap)'),
-  raw_html: optBool('Keep stored HTML (no conversion, no cap)'),
+  max_content_chars: z.number().int().min(0).optional(),
+  raw_html: z.boolean().optional(),
 };
 
-export const orderSchema = z.enum(['ASC', 'DESC']).optional().describe('Sort direction');
+export const orderSchema = z.enum(['ASC', 'DESC']).optional();
+export const sortSchema = z.union([z.string().min(1), z.number().int()]).optional();
+
+/** start/limit: every paged tool. */
+export const pageShape = {
+  start: z.number().int().min(0).optional(),
+  limit: z.number().int().min(1).optional(),
+};
+
+/** Paging of the search/{itemtype} tools. */
+export const searchPageShape = {
+  ...pageShape,
+  fetch_all: z.boolean().optional(),
+  max_rows: z.number().int().min(1).optional(),
+  sort: sortSchema,
+  order: orderSchema,
+};
+
+export const isDeleted = z.boolean().optional();
+export const expandDropdowns = z.boolean().optional();
 
 /** Paging/sorting arguments of the GET /{itemtype} list tools. */
 export const listShape = {
-  start: z.number().int().min(0).optional().describe('Offset (default 0); next page: next_start'),
-  limit: z.number().int().min(1).optional().describe(`Rows per page (default ${DEFAULT_LIST_LIMIT}, max 500)`),
-  range: optStr('Legacy "START-END", overrides start/limit'),
-  sort: z
-    .union([z.string().min(1), z.number().int().min(1)])
-    .optional()
-    .describe('Own column ("date_mod", "name"...) or its search-option id'),
+  ...pageShape,
+  /** v3 "START-END"; accepted, not advertised. */
+  range: hidden(optStr('Legacy START-END')),
+  sort: sortSchema,
   order: orderSchema,
-  expand_dropdowns: optBool('Labels instead of ids (default true)'),
-  is_deleted: optBool('true = list ONLY trashed rows'),
+  expand_dropdowns: expandDropdowns,
+  is_deleted: isDeleted,
 };
 
 export interface ListArgs {

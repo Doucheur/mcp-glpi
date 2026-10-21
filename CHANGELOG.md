@@ -38,6 +38,13 @@ Stub with the facts for the release notes (rewritten in step 4).
 - `GLPI_TOOLSETS` (tickets, itil, assets, users, kb, search, stats, session,
   admin), `GLPI_READ_ONLY=1`, `GLPI_LEGACY_TOOLS=1`; HTTP mode warns when
   `GLPI_READ_ONLY` is unset. Server `instructions`.
+- Smaller `tools/list`: 25.7k characters for the full catalogue (v3: 41.9k),
+  12.5k with `GLPI_READ_ONLY=1`. Code tables (status, urgency, priority...),
+  the date format and the paging/text rules are in the server
+  `instructions`, sent once per session; parameter descriptions point there.
+  Legacy parameters (`range`, `force`, `parent_id`/`child_id`/`link_type`)
+  are still accepted but no longer listed. `npm run measure` prints the
+  sizes.
 
 ### Alias table (v3 name -> v4 call)
 | v3 tool | v4 tool and mapped arguments |

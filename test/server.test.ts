@@ -16,7 +16,8 @@ import { McpError } from '@modelcontextprotocol/sdk/types.js';
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import { GlpiClient } from '../src/glpi-client.js';
 import { ALL_ALIASES, ALL_TOOLS, INSTRUCTIONS, SERVER_VERSION, createMcpServer } from '../src/server.js';
-import { annotationsOf, parseRegistryOptions, type RegistryOptions, type ToolDef } from '../src/tools/registry.js';
+import { SHARED_PARAMS } from '../src/tools/common.js';
+import { annotationsOf, parseRegistryOptions, slimJsonSchema, type RegistryOptions, type ToolDef } from '../src/tools/registry.js';
 import { text } from '../src/output.js';
 
 // ---------------------------------------------------------------------------
@@ -125,19 +126,121 @@ const resultJson = (r: unknown) => JSON.parse(resultText(r));
 // Catalogue
 // ---------------------------------------------------------------------------
 
+/** Parameters listed without a description: their name says what they are. */
+const SELF_EXPLANATORY = /^(id|itemtype|content|firstname|email|phone|\w+_id|is_\w+)$/;
+
 test('tools/list is exactly the v4 catalogue, without aliases', async () => {
   const tools = await listNames();
   assert.deepEqual(tools.map((t) => t.name).sort(), EXPECTED_TOOLS);
   const aliasNames = new Set(ALL_ALIASES.map((a) => a.name));
   assert.ok(tools.every((t) => !aliasNames.has(t.name)));
   for (const t of tools) {
-    assert.ok(t.title, `${t.name} has a title`);
+    if (t.title !== undefined) assert.notEqual(t.title.toLowerCase(), t.name.replace(/^glpi_/, '').replace(/_/g, ' '));
     assert.ok(t.annotations, `${t.name} has annotations`);
     assert.equal((t.inputSchema as Record<string, unknown>).$schema, undefined);
+    // Tool descriptions: short, and never restating the tool's own name.
+    assert.ok(t.description && t.description.length <= 160, `${t.name}: ${t.description?.length} chars`);
+    assert.doesNotMatch(t.description, new RegExp(`\\b${t.name}\\b`), `${t.name} description repeats its name`);
+    // Every parameter is described, or shared and explained in the instructions,
+    // or self-explanatory by name.
     for (const [key, prop] of Object.entries(t.inputSchema.properties ?? {})) {
-      assert.ok((prop as { description?: string }).description, `${t.name}.${key} is described`);
+      if ((prop as { description?: string }).description) continue;
+      if ((SHARED_PARAMS as readonly string[]).includes(key)) {
+        assert.ok(INSTRUCTIONS.includes(key), `${key} is explained in the instructions`);
+        continue;
+      }
+      assert.match(key, SELF_EXPLANATORY, `${t.name}.${key} is described`);
     }
   }
+});
+
+test('catalogue size stays under its ceiling', async () => {
+  // tools/list goes with every request of a session: 44,291 chars in the
+  // first v4 cut, 41,921 in v3. Raise these only with a reason.
+  const full = JSON.stringify({ tools: await listNames() }).length;
+  assert.ok(full <= 26_000, `full catalogue: ${full} chars`);
+  const readOnly = JSON.stringify({ tools: await listNames(parseRegistryOptions({ GLPI_READ_ONLY: '1' })) }).length;
+  assert.ok(readOnly <= 13_000, `GLPI_READ_ONLY=1 catalogue: ${readOnly} chars`);
+  assert.ok(INSTRUCTIONS.length <= 2_500, `instructions: ${INSTRUCTIONS.length} chars`);
+});
+
+test('listed schemas carry no scaffolding; validation stays strict', async () => {
+  const tools = await listNames();
+  const serialized = JSON.stringify(tools);
+  assert.doesNotMatch(serialized, /"additionalProperties":false/);
+  assert.doesNotMatch(serialized, /"required":\[\]/);
+  assert.doesNotMatch(serialized, /"\$schema"/);
+  assert.doesNotMatch(serialized, /"exclusiveMinimum"/);
+  assert.doesNotMatch(serialized, /openWorldHint/);
+  const byName = new Map(tools.map((t) => [t.name, t]));
+  // A title that only restates the name is dropped; a different one is kept.
+  assert.equal(byName.get('glpi_list_items')?.title, undefined);
+  assert.equal(byName.get('glpi_get_ticket_timeline')?.title, 'Get ITIL timeline');
+  // Annotations equal to the MCP defaults are omitted.
+  assert.deepEqual(byName.get('glpi_get_ticket')?.annotations, { readOnlyHint: true });
+  assert.deepEqual(byName.get('glpi_create_ticket')?.annotations, { destructiveHint: false });
+  assert.deepEqual(byName.get('glpi_delete_item')?.annotations, { idempotentHint: true });
+  // Enums, types, minimum and required survive.
+  type Schema = { properties: Record<string, Record<string, unknown>>; required?: string[] };
+  const listItems = byName.get('glpi_list_items')!.inputSchema as Schema;
+  assert.deepEqual(listItems.required, ['itemtype']);
+  assert.ok(Array.isArray(listItems.properties.itemtype.enum));
+  assert.equal(listItems.properties.limit.minimum, 1);
+  assert.deepEqual(listItems.properties.sort.type, ['string', 'integer']);
+  assert.equal((byName.get('glpi_get_ticket')!.inputSchema as Schema).properties.id.minimum, 1);
+  // Legacy parameters are accepted but not listed.
+  assert.equal(listItems.properties.range, undefined);
+  const link = byName.get('glpi_link_tickets')!.inputSchema as Schema;
+  assert.deepEqual(Object.keys(link.properties).sort(), ['other_ticket_id', 'relation', 'ticket_id']);
+  assert.equal((byName.get('glpi_delete_ticket')!.inputSchema as Schema).properties.force, undefined);
+  // Write item tools list itemtype as a string; the enum still validates.
+  const createItem = byName.get('glpi_create_item')!.inputSchema as Schema;
+  assert.equal(createItem.properties.itemtype.enum, undefined);
+  assert.equal(createItem.properties.itemtype.type, 'string');
+
+  const calls = installFetch((c) => {
+    if (c.method === 'GET' && c.path === 'Computer') return json([], { headers: { 'Content-Range': '0-0/0' } });
+    if (c.method === 'POST') return json({ id: 1 }, { status: 201 });
+    if (c.method === 'DELETE') return json([{ 7: true }]);
+    return undefined;
+  });
+  const { client, close } = await connect();
+  await client.callTool({ name: 'glpi_list_items', arguments: { itemtype: 'Computer', range: '10-14' } });
+  assert.equal(calls.find((c) => c.path === 'Computer')?.query.get('range'), '10-14');
+  const linked = await client.callTool({ name: 'glpi_link_tickets', arguments: { parent_id: 7, child_id: 8 } });
+  assert.ok(!(linked as CallToolResult).isError, resultText(linked));
+  const purged = await client.callTool({ name: 'glpi_delete_ticket', arguments: { id: 7, force: true, confirm_id: 7 } });
+  assert.equal(resultJson(purged).purged, true);
+  await assert.rejects(
+    client.callTool({ name: 'glpi_create_item', arguments: { itemtype: 'Bogus', input: { name: 'x' } } }),
+    /itemtype/
+  );
+  await close();
+});
+
+test('slimJsonSchema drops branch descriptions and restated defaults only', () => {
+  const slim = slimJsonSchema({
+    type: 'object',
+    additionalProperties: false,
+    required: [],
+    properties: {
+      a: { anyOf: [{ type: 'string', description: 'x' }, { type: 'integer', minimum: 1 }], description: 'A' },
+      b: { type: 'integer', default: 3, description: 'B (default 3)' },
+      c: { type: 'integer', default: 3, description: 'C' },
+      d: { type: 'string', minLength: 1, maxLength: 9 },
+      e: { type: 'object', additionalProperties: { type: 'string' } },
+    },
+  });
+  assert.deepEqual(slim, {
+    type: 'object',
+    properties: {
+      a: { anyOf: [{ type: 'string' }, { type: 'integer', minimum: 1 }], description: 'A' },
+      b: { type: 'integer', description: 'B (default 3)' },
+      c: { type: 'integer', default: 3, description: 'C' },
+      d: { type: 'string', maxLength: 9 },
+      e: { type: 'object', additionalProperties: { type: 'string' } },
+    },
+  });
 });
 
 test('every v3 tool name is either kept or a hidden alias', () => {
@@ -189,7 +292,7 @@ test('GLPI_TOOLSETS=tickets lists only the tickets toolset', async () => {
 });
 
 test('server instructions stay short and the version matches package.json', () => {
-  assert.ok(INSTRUCTIONS.length < 1500, `${INSTRUCTIONS.length} chars`);
+  assert.ok(INSTRUCTIONS.length < 2500, `${INSTRUCTIONS.length} chars`);
   const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
   assert.equal(SERVER_VERSION, pkg.version);
 });
