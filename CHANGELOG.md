@@ -1,5 +1,69 @@
 # Changelog
 
+## 3.4.0 — 2026-10-21
+
+### Fixed (issue #9 — Change / Problem coverage)
+
+- **Change and Problem tasks are now readable**: new `glpi_get_change_tasks`
+  (`GET /Change/{id}/ChangeTask`) and `glpi_get_problem_tasks`
+  (`GET /Problem/{id}/ProblemTask`). Previously only `TicketTask` was reachable,
+  and passing a change id to `glpi_get_ticket_tasks` silently returned the
+  tasks of the unrelated *ticket* with the same number. The ticket tool's
+  description now says so.
+- **`glpi_get_ticket_timeline` accepts `itemtype`** (`Ticket` default,
+  `Change`, `Problem`): followups, tasks, solutions and validations are read
+  from the right sub-resources (`ChangeTask`, `ChangeValidation`, ...;
+  problems have no validation object in GLPI).
+- `glpi_get_change` / `glpi_get_problem` now return `counts` of followups,
+  tasks, solutions (and validations for changes), like `glpi_get_ticket`.
+- **Change status labels were wrong**: the map assumed a 1..12 sequence, but
+  GLPI uses `CommonITILObject` constants (Applied=5, Closed=6, Accepted=7,
+  Review=8, Evaluation=9, Approval=10, Testing=11, Qualification=12,
+  Refused=13, Cancelled=14). A solved change (5) was labelled "Pending".
+- **Problem status labels**: 2 is "Processing (assigned)" (was "Accepted"),
+  7 "Accepted" and 8 "Under observation" were missing.
+- **`sort` on `glpi_list_*` returned HTTP 400** (`sort param is not a field of
+  glpi_changes`): `GET /{itemtype}` sorts by column name, not by search-option
+  id. `sort` now accepts a column name (`"date_mod"`) or a search-option id,
+  which is resolved to its column through the SearchOptions catalogue (own
+  table only; joined fields return a clear error). The zod schema also
+  accepted only strings while the JSON schema advertised numbers, so numeric
+  sorts on `glpi_list_tickets` failed validation.
+- Status labels and ITIL itemtype helpers moved to `src/itil.ts` and are unit
+  tested (`test/itil.test.ts`).
+
+### Added
+
+- **Streamable HTTP transport** (`MCP_TRANSPORT=http`, or `--http`): the
+  server can now serve MCP over HTTP at `http://<host>:<port>/mcp` (JSON-RPC,
+  stateless, JSON responses) in addition to stdio. This is the only transport
+  Open WebUI supports ("MCP (Streamable HTTP)" under Admin Settings → External
+  Tools), so `mcp-glpi` can now be attached to it directly. The endpoint also
+  answers `GET /health` for liveness probes. stdio stays the default, so
+  existing Claude Desktop / Claude Code configs are unaffected.
+- CLI flags: `--http`, `--transport <stdio|http>`, `--host`, `--port`
+  (`0` picks a free port), `--path`, `--help`.
+- HTTP environment variables: `MCP_HTTP_HOST` (default `127.0.0.1`),
+  `MCP_HTTP_PORT` (falls back to `PORT`), `MCP_HTTP_PATH` (default `/mcp`),
+  `MCP_HTTP_AUTH_TOKEN` (optional `Authorization: Bearer` requirement),
+  `MCP_HTTP_ALLOWED_HOSTS` (Host-header allowlist).
+- Tests: `test/http-server.test.ts` covers transport configuration, the
+  JSON-RPC endpoint (initialize / tools/list / tools/call), HTTP edge cases
+  (405 on GET/DELETE, 404, malformed and oversize bodies), bearer auth and
+  Host-header validation.
+
+### Fixed
+
+- Concurrent requests no longer open duplicate GLPI sessions: `initSession()`
+  is now single-flight, so parallel calls share one session instead of each
+  opening — and leaking — their own. Matters as soon as several HTTP clients
+  (or one client issuing parallel tool calls) hit the server at once.
+
+### Changed
+
+- The MCP `serverInfo` version now reports the package version instead of the
+  stale hard-coded `3.0.0`.
+
 ## 3.3.0 — 2026-08-05
 
 ### Added

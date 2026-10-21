@@ -156,6 +156,35 @@ async function main() {
 
   // ---- read: other domains ----
   console.log('\nOther domains (read):');
+  await check('getChanges(limit 3, sort "date_mod") — column-name sort (#9)', async () => {
+    const changes = await client.getChanges({ range: '0-2', sort: 'date_mod', order: 'DESC' });
+    return `${changes.length} rows`;
+  });
+
+  await check('getTickets(limit 3, sort 19) — search-option id resolved to column (#9)', async () => {
+    const tickets = await client.getTickets({ range: '0-2', sort: 19, order: 'DESC' });
+    return `${tickets.length} rows`;
+  });
+
+  await check('change tasks + validations (#9)', async () => {
+    const changes = await client.getChanges({ range: '0-0' });
+    if (changes.length === 0) return 'no change on this instance, skipped';
+    const id = (changes[0] as { id: number }).id;
+    const [tasks, validations] = await Promise.all([
+      client.getChangeTasks(id),
+      client.getItilValidations('Change', id),
+    ]);
+    return `change #${id}: ${tasks.length} task(s), ${validations.length} validation(s)`;
+  });
+
+  await check('problem tasks (#9)', async () => {
+    const problems = await client.getProblems({ range: '0-0' });
+    if (problems.length === 0) return 'no problem on this instance, skipped';
+    const id = (problems[0] as { id: number }).id;
+    const tasks = await client.getProblemTasks(id);
+    return `problem #${id}: ${tasks.length} task(s)`;
+  });
+
   await check('getUsers(active, limit 5)', async () => {
     const users = (await client.getUsers({ range: '0-4', is_active: true })) as any[];
     return `${users.length} rows`;

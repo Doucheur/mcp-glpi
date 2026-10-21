@@ -25,12 +25,39 @@ import {
   ErrorCode,
   McpError,
 } from '@modelcontextprotocol/sdk/types.js';
+import type {
+  CallToolRequest,
+  CallToolResult,
+  ListResourcesResult,
+  ListToolsResult,
+  ReadResourceRequest,
+  ReadResourceResult,
+} from '@modelcontextprotocol/sdk/types.js';
 import { readFile } from 'node:fs/promises';
 import { basename, extname } from 'node:path';
 import { z } from 'zod';
 import { GlpiClient, GlpiConfig, ListOptions } from './glpi-client.js';
 import { GlpiError } from './http.js';
+import {
+  ConfigError,
+  HttpTransportConfig,
+  USAGE,
+  parseTransportConfig,
+  startHttpMcpServer,
+} from './http-server.js';
 import { SearchCriterion, SearchType, SearchLink } from './search.js';
+import {
+  CHANGE_STATUS,
+  ItilItemtype,
+  PROBLEM_STATUS,
+  TICKET_STATUS,
+  TICKET_URGENCY,
+  VALIDATION_STATUS,
+  isItilItemtype,
+} from './itil.js';
+
+/** Keep in sync with package.json (see CLAUDE.md). */
+const SERVER_VERSION = '3.4.0';
 
 // ---------------------------------------------------------------------------
 // Validation Schemas
@@ -40,7 +67,7 @@ const listArgsSchema = z.object({
   start: z.number().int().min(0).optional(),
   limit: z.number().int().min(1).max(10000).optional(),
   range: z.string().optional(),
-  sort: z.string().optional(),
+  sort: z.union([z.number().int().min(1), z.string().min(1)]).optional(),
   order: z.enum(['ASC', 'DESC']).optional(),
   expand_dropdowns: z.boolean().optional(),
   criteria: z.array(z.unknown()).optional(),
@@ -73,36 +100,7 @@ const ticketSearchSchema = z.object({
 // Constants
 // ---------------------------------------------------------------------------
 
-const TICKET_STATUS: Record<number, string> = {
-  1: 'New',
-  2: 'Processing (assigned)',
-  3: 'Processing (planned)',
-  4: 'Pending',
-  5: 'Solved',
-  6: 'Closed',
-};
-
-const TICKET_URGENCY: Record<number, string> = {
-  1: 'Very low',
-  2: 'Low',
-  3: 'Medium',
-  4: 'High',
-  5: 'Very high',
-};
-
-const PROBLEM_STATUS: Record<number, string> = {
-  1: 'New', 2: 'Accepted', 3: 'Planned', 4: 'Pending', 5: 'Solved', 6: 'Closed',
-};
-
-const CHANGE_STATUS: Record<number, string> = {
-  1: 'New', 2: 'Evaluation', 3: 'Approval', 4: 'Accepted', 5: 'Pending',
-  6: 'Test', 7: 'Qualification', 8: 'Applied', 9: 'Review', 10: 'Closed',
-  11: 'Refused', 12: 'Canceled',
-};
-
-const VALIDATION_STATUS: Record<number, string> = {
-  1: 'Waiting', 2: 'Granted', 3: 'Refused',
-};
+// Status / urgency labels: see src/itil.ts (GLPI CommonITILObject constants).
 
 // Standard Ticket search-option field ids (GLPI ≥ 9.5). Fallbacks; the
 // SearchOptions cache is used to resolve friendly names dynamically.
@@ -188,7 +186,7 @@ function parseListArgs(args: Record<string, unknown> | undefined): ListOptions {
     opts.range = '0-49';
   }
 
-  if (args.sort !== undefined) opts.sort = args.sort as number;
+  if (args.sort !== undefined) opts.sort = args.sort as number | string;
   if (args.order) opts.order = args.order as 'ASC' | 'DESC';
   if (args.is_deleted !== undefined) opts.is_deleted = args.is_deleted as boolean;
   if (args.include_deleted !== undefined) opts.is_deleted = args.include_deleted as boolean;
@@ -243,12 +241,33 @@ function formatTicketSummary(t: any) {
 // Server setup
 // ---------------------------------------------------------------------------
 
-const server = new Server(
-  { name: 'mcp-glpi', version: '3.0.0' },
-  { capabilities: { tools: {}, resources: {} } }
-);
-
+/**
+ * The GLPI client is process-wide: one GLPI session shared by every MCP
+ * connection (one stdio client, or every request to the HTTP endpoint).
+ */
 let client: GlpiClient;
+
+/**
+ * Build an MCP server with every handler registered.
+ *
+ * A `Server` can be attached to exactly one transport — `Protocol.connect()`
+ * throws on the second — so stdio gets one instance and each HTTP POST gets its
+ * own. Building an instance is cheap: the handlers below are module-level
+ * functions and the tool catalogue is a constant.
+ */
+function createMcpServer(): Server {
+  const server = new Server(
+    { name: 'mcp-glpi', version: SERVER_VERSION },
+    { capabilities: { tools: {}, resources: {} } }
+  );
+
+  server.setRequestHandler(ListToolsRequestSchema, handleListTools);
+  server.setRequestHandler(CallToolRequestSchema, handleCallTool);
+  server.setRequestHandler(ListResourcesRequestSchema, handleListResources);
+  server.setRequestHandler(ReadResourceRequestSchema, handleReadResource);
+
+  return server;
+}
 
 // ---------------------------------------------------------------------------
 // Tool registration
@@ -258,7 +277,11 @@ const LIST_TOOL_COMMON_PROPS = {
   start: { type: 'number', description: 'Offset (default 0)' },
   limit: { type: 'number', description: 'Max rows in this call (default 50)' },
   range: { type: 'string', description: 'Explicit "START-END" range; overrides start/limit' },
-  sort: { type: 'number', description: 'Sort by field id (search option id)' },
+  sort: {
+    type: ['string', 'number'],
+    description:
+      'Sort column of the itemtype table (e.g. "date_mod", "status", "entities_id"), or a search-option id of that same table (resolved to its column). Joined fields (requester name, category label) cannot be sorted on here — use glpi_search_v2.',
+  },
   order: { type: 'string', enum: ['ASC', 'DESC'] },
   expand_dropdowns: { type: 'boolean', description: 'Resolve FK ids to labels (default true)' },
 };
@@ -313,8 +336,13 @@ function annotate<T extends { name: string }>(tool: T): T & { annotations: ToolA
   return { ...tool, annotations: toolAnnotations(tool.name) };
 }
 
-server.setRequestHandler(ListToolsRequestSchema, async () => ({
-  tools: [
+/** One entry of the tool catalogue, as `tools/list` reports it. */
+type ToolDefinition = ListToolsResult['tools'][number];
+
+const handleListTools = async (): Promise<ListToolsResult> => {
+  // Annotating the array keeps `type: 'object'` literal instead of widening to
+  // `string`, which the tools/list result type requires.
+  const tools: ToolDefinition[] = [
     // ============== READ — TICKETS ==============
     {
       name: 'glpi_list_tickets',
@@ -341,10 +369,13 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
     },
     {
       name: 'glpi_get_ticket_timeline',
-      description: 'Full chronological timeline of a ticket: followups + tasks + solutions + validations, sorted by date.',
+      description: 'Full chronological timeline of a Ticket, Change or Problem: followups + tasks + solutions + validations, sorted by date. Set itemtype for changes/problems (ids are not shared between itemtypes).',
       inputSchema: {
         type: 'object',
-        properties: { id: { type: 'number' } },
+        properties: {
+          id: { type: 'number' },
+          itemtype: { type: 'string', enum: ['Ticket', 'Change', 'Problem'], description: 'Default Ticket' },
+        },
         required: ['id'],
       },
     },
@@ -382,7 +413,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
     },
     {
       name: 'glpi_get_ticket_tasks',
-      description: 'List tasks of a ticket.',
+      description: 'List tasks (TicketTask) of a ticket. Ticket only: for a Change or Problem use glpi_get_change_tasks / glpi_get_problem_tasks (a Change id passed here would return the tasks of the unrelated Ticket with that number).',
       inputSchema: { type: 'object', properties: { ticket_id: { type: 'number' } }, required: ['ticket_id'] },
     },
     {
@@ -609,8 +640,13 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
     },
     {
       name: 'glpi_get_problem',
-      description: 'Get a problem with status label.',
+      description: 'Get a problem with status label and counts of followups/tasks/solutions.',
       inputSchema: { type: 'object', properties: { id: { type: 'number' } }, required: ['id'] },
+    },
+    {
+      name: 'glpi_get_problem_tasks',
+      description: 'List tasks (ProblemTask) of a problem.',
+      inputSchema: { type: 'object', properties: { problem_id: { type: 'number' } }, required: ['problem_id'] },
     },
     {
       name: 'glpi_create_problem',
@@ -632,7 +668,8 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
         type: 'object',
         properties: {
           id: { type: 'number' }, name: { type: 'string' }, content: { type: 'string' },
-          status: { type: 'number' }, urgency: { type: 'number' },
+          status: { type: 'number', description: '1 New, 2 Processing (assigned), 3 Processing (planned), 4 Pending, 5 Solved, 6 Closed, 7 Accepted, 8 Under observation' },
+          urgency: { type: 'number' },
         },
         required: ['id'],
       },
@@ -644,8 +681,13 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
     },
     {
       name: 'glpi_get_change',
-      description: 'Get a change with status label.',
+      description: 'Get a change with status label and counts of followups/tasks/solutions/validations.',
       inputSchema: { type: 'object', properties: { id: { type: 'number' } }, required: ['id'] },
+    },
+    {
+      name: 'glpi_get_change_tasks',
+      description: 'List tasks (ChangeTask) of a change.',
+      inputSchema: { type: 'object', properties: { change_id: { type: 'number' } }, required: ['change_id'] },
     },
     {
       name: 'glpi_create_change',
@@ -667,7 +709,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
         type: 'object',
         properties: {
           id: { type: 'number' }, name: { type: 'string' }, content: { type: 'string' },
-          status: { type: 'number' },
+          status: { type: 'number', description: '1 New, 9 Evaluation, 10 Approval, 7 Accepted, 4 Pending, 11 Testing, 12 Qualification, 5 Applied, 8 Review, 6 Closed, 13 Refused, 14 Cancelled' },
         },
         required: ['id'],
       },
@@ -676,7 +718,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
     // ============== ASSETS ==============
     ...[
       'computers', 'softwares', 'network_equipments', 'printers', 'monitors', 'phones',
-    ].flatMap((asset) => {
+    ].flatMap((asset): ToolDefinition[] => {
       const singular = asset.replace(/s$/, '');
       return [
         {
@@ -1101,14 +1143,16 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
         required: ['itemtype', 'field', 'searchtype', 'value'],
       },
     },
-  ].map(annotate),
-}));
+  ];
+
+  return { tools: tools.map(annotate) };
+};
 
 // ---------------------------------------------------------------------------
 // Tool dispatch
 // ---------------------------------------------------------------------------
 
-server.setRequestHandler(CallToolRequestSchema, async (request) => {
+const handleCallTool = async (request: CallToolRequest): Promise<CallToolResult> => {
   const { name, arguments: argsRaw } = request.params;
   const args = (argsRaw ?? {}) as Record<string, unknown>;
 
@@ -1150,11 +1194,15 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       case 'glpi_get_ticket_timeline': {
         const id = args.id as number;
         if (!id) throw new McpError(ErrorCode.InvalidParams, 'id required');
+        const itemtype: ItilItemtype = args.itemtype === undefined ? 'Ticket' : (args.itemtype as ItilItemtype);
+        if (!isItilItemtype(itemtype)) {
+          throw new McpError(ErrorCode.InvalidParams, 'itemtype must be Ticket, Change or Problem');
+        }
         const [followups, tasks, solutions, validations] = await Promise.all([
-          client.getTicketFollowups(id),
-          client.getTicketTasks(id),
-          client.getTicketSolutions(id),
-          client.getTicketValidations(id),
+          client.getItilFollowups(itemtype, id),
+          client.getItilTasks(itemtype, id),
+          client.getItilSolutions(itemtype, id),
+          client.getItilValidations(itemtype, id),
         ]);
         const timeline = [
           ...followups.map((f: any) => ({ kind: 'followup', date: f.date_creation ?? f.date, ...f })),
@@ -1167,7 +1215,13 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             ...v,
           })),
         ].sort((a, b) => (a.date ?? '').localeCompare(b.date ?? ''));
-        return text({ ticket_id: id, count: timeline.length, timeline });
+        return text({
+          itemtype,
+          id,
+          ...(itemtype === 'Ticket' ? { ticket_id: id } : {}),
+          count: timeline.length,
+          timeline,
+        });
       }
 
       case 'glpi_search_tickets': {
@@ -1436,12 +1490,24 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
       case 'glpi_get_problem': {
         const id = args.id as number;
-        const p = await client.getProblem(id);
+        if (!id) throw new McpError(ErrorCode.InvalidParams, 'id required');
+        const [p, followups, tasks, solutions] = await Promise.all([
+          client.getProblem(id),
+          client.getItilFollowups('Problem', id),
+          client.getItilTasks('Problem', id),
+          client.getItilSolutions('Problem', id),
+        ]);
         return text({
           ...p,
           status_label: PROBLEM_STATUS[(p as any).status],
           urgency_label: TICKET_URGENCY[(p as any).urgency],
+          counts: { followups: followups.length, tasks: tasks.length, solutions: solutions.length },
         });
+      }
+      case 'glpi_get_problem_tasks': {
+        const id = args.problem_id as number;
+        if (!id) throw new McpError(ErrorCode.InvalidParams, 'problem_id required');
+        return text(await client.getProblemTasks(id));
       }
       case 'glpi_create_problem': {
         const result = await client.createProblem({
@@ -1475,12 +1541,30 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
       case 'glpi_get_change': {
         const id = args.id as number;
-        const c = await client.getChange(id);
+        if (!id) throw new McpError(ErrorCode.InvalidParams, 'id required');
+        const [c, followups, tasks, solutions, validations] = await Promise.all([
+          client.getChange(id),
+          client.getItilFollowups('Change', id),
+          client.getItilTasks('Change', id),
+          client.getItilSolutions('Change', id),
+          client.getItilValidations('Change', id),
+        ]);
         return text({
           ...c,
           status_label: CHANGE_STATUS[(c as any).status],
           urgency_label: TICKET_URGENCY[(c as any).urgency],
+          counts: {
+            followups: followups.length,
+            tasks: tasks.length,
+            solutions: solutions.length,
+            validations: validations.length,
+          },
         });
+      }
+      case 'glpi_get_change_tasks': {
+        const id = args.change_id as number;
+        if (!id) throw new McpError(ErrorCode.InvalidParams, 'change_id required');
+        return text(await client.getChangeTasks(id));
       }
       case 'glpi_create_change': {
         const result = await client.createChange({
@@ -1842,13 +1926,13 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       `Error executing ${name}: ${error instanceof Error ? error.message : String(error)}`
     );
   }
-});
+};
 
 // ---------------------------------------------------------------------------
 // Resources
 // ---------------------------------------------------------------------------
 
-server.setRequestHandler(ListResourcesRequestSchema, async () => ({
+const handleListResources = async (): Promise<ListResourcesResult> => ({
   resources: [
     { uri: 'glpi://tickets/open', name: 'Open Tickets', description: 'Tickets with status < 5', mimeType: 'application/json' },
     { uri: 'glpi://tickets/recent', name: 'Recent Tickets', description: 'Most recent tickets', mimeType: 'application/json' },
@@ -1860,9 +1944,9 @@ server.setRequestHandler(ListResourcesRequestSchema, async () => ({
     { uri: 'glpi://stats/tickets', name: 'Ticket Statistics', description: 'Ticket counts', mimeType: 'application/json' },
     { uri: 'glpi://stats/assets', name: 'Asset Statistics', description: 'Asset counts', mimeType: 'application/json' },
   ],
-}));
+});
 
-server.setRequestHandler(ReadResourceRequestSchema, async (request) => {
+const handleReadResource = async (request: ReadResourceRequest): Promise<ReadResourceResult> => {
   const { uri } = request.params;
   try {
     switch (uri) {
@@ -1910,14 +1994,81 @@ server.setRequestHandler(ReadResourceRequestSchema, async (request) => {
       `Error reading resource: ${error instanceof Error ? error.message : String(error)}`
     );
   }
-});
+};
 
 // ---------------------------------------------------------------------------
 // Main
 // ---------------------------------------------------------------------------
 
+/** Set in HTTP mode so shutdown can stop accepting requests. */
+let runningHttpServer: { close: () => Promise<void> } | undefined;
+let shuttingDown = false;
+
+async function shutdown(reason: string) {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  console.error(`Shutting down (${reason})...`);
+  try {
+    await runningHttpServer?.close();
+  } catch (error) {
+    console.error('Warning: HTTP server close failed:', error instanceof Error ? error.message : error);
+  }
+  try {
+    await client.killSession();
+  } catch (error) {
+    console.error('Warning: killSession failed during shutdown:', error instanceof Error ? error.message : error);
+  }
+  process.exit(0);
+}
+
+/** MCP over stdin/stdout — one client, the default (Claude Desktop/Code, Cursor). */
+async function startStdioTransport() {
+  const server = createMcpServer();
+  await server.connect(new StdioServerTransport());
+  console.error(`MCP GLPI Server v${SERVER_VERSION} running on stdio`);
+}
+
+/** MCP Streamable HTTP — web clients such as Open WebUI. */
+async function startHttpTransport(config: HttpTransportConfig) {
+  const running = await startHttpMcpServer({
+    config,
+    createServer: createMcpServer,
+    log: (message) => console.error(`[mcp-http] ${message}`),
+  });
+  runningHttpServer = running;
+
+  console.error(`MCP GLPI Server v${SERVER_VERSION} listening on ${running.url}`);
+  console.error('  transport: streamable HTTP (stateless, JSON responses)');
+  console.error(
+    `  auth: ${config.authToken ? 'bearer token required' : 'none — bind to loopback or set MCP_HTTP_AUTH_TOKEN before exposing this port'}`
+  );
+  if (!config.allowedHosts) {
+    console.error(
+      `  warning: Host header validation is off because the server is bound to ${config.host}; ` +
+      'set MCP_HTTP_ALLOWED_HOSTS to restrict it'
+    );
+  }
+}
+
 async function main() {
   try {
+    const argv = process.argv.slice(2);
+    if (argv.includes('--help') || argv.includes('-h')) {
+      console.error(USAGE);
+      process.exit(0);
+    }
+
+    let transportConfig;
+    try {
+      transportConfig = parseTransportConfig(argv, process.env);
+    } catch (error) {
+      if (error instanceof ConfigError) {
+        console.error(`Configuration error: ${error.message}\n\n${USAGE}`);
+        process.exit(2);
+      }
+      throw error;
+    }
+
     const config = getConfig();
     client = new GlpiClient(config);
 
@@ -1933,20 +2084,14 @@ async function main() {
       );
     }
 
-    const transport = new StdioServerTransport();
-    await server.connect(transport);
-    console.error('MCP GLPI Server v3.0 running on stdio');
+    if (transportConfig.mode === 'http') {
+      await startHttpTransport(transportConfig.http);
+    } else {
+      await startStdioTransport();
+    }
 
-    const shutdown = async () => {
-      try {
-        await client.killSession();
-      } catch (error) {
-        console.error('Warning: killSession failed during shutdown:', error instanceof Error ? error.message : error);
-      }
-      process.exit(0);
-    };
-    process.on('SIGINT', shutdown);
-    process.on('SIGTERM', shutdown);
+    process.on('SIGINT', () => void shutdown('SIGINT'));
+    process.on('SIGTERM', () => void shutdown('SIGTERM'));
   } catch (error) {
     console.error('Failed to start server:', error);
     process.exit(1);
