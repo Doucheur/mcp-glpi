@@ -103,8 +103,8 @@ test('draft_solution, kb_from_ticket and my_open_tickets name their tools', asyn
   assert.ok(draft.includes('glpi_search_knowbase') && draft.includes('glpi_add_solution {"ticket_id": 7'));
   assert.ok(kb.includes('glpi_create_knowbase_item') && kb.includes('Source: ticket 8'));
   assert.match(kb, /Symptoms[\s\S]*Cause[\s\S]*Resolution[\s\S]*Keywords/);
-  assert.ok(mine.includes('glpi_get_session_info') && mine.includes('"assigned_user_id": <me.id>'));
-  assert.match(mine, /"me" is not accepted/);
+  assert.ok(mine.includes('glpi_search_tickets {"assigned_user_id": "me"'));
+  assert.doesNotMatch(mine, /<me\.id>|not accepted/);
 });
 
 test('every tool named in a prompt exists in the catalogue', () => {
