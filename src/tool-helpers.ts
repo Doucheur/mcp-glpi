@@ -128,15 +128,19 @@ export const TICKET_FIELDS = {
   requester_user: 4,
   technician_user: 5,
   technician_group: 8,
+  observer_user: 66,
   type: 14,
 } as const;
 
 export type TicketFieldKey = keyof typeof TICKET_FIELDS;
 
 /**
- * Column/uid used to resolve each key dynamically. Joined actor fields
- * (requester/technician share the uid "Ticket.Ticket_User.User.name") cannot
- * be told apart by name, so they keep their static ids.
+ * Column/uid used to resolve each key dynamically. The actor options
+ * (requester 4, technician 5, observer 66: Ticket_User rows of type 1, 2, 3)
+ * share one uid and one column (`name` of glpi_users); the role is a join
+ * condition, not part of the option. They cannot be told apart through
+ * listSearchOptions, so they keep GLPI's standard ids. On a GLPI where they
+ * were renumbered, filter with glpi_search_v2 and the right option id.
  */
 const TICKET_FIELD_REFS: Partial<Record<TicketFieldKey, string>> = {
   id: 'Ticket.id',

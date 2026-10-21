@@ -131,6 +131,8 @@ test('ticketField resolves dynamically, caches, and falls back to static ids', a
   assert.equal(await ticketField(c, 'time_to_resolve'), 118);
   assert.equal(await ticketField(c, 'status'), 112);
   assert.equal(await ticketField(c, 'technician_user'), 5, 'joined actor fields keep the static id');
+  assert.equal(await ticketField(c, 'requester_user'), 4, 'even when the catalogue lists the shared actor uid');
+  assert.equal(await ticketField(c, 'observer_user'), 66, 'observer: static id 66');
   assert.equal(await ticketField(c, 'urgency'), 10, 'unknown column -> static id');
   await ticketField(c, 'status');
   assert.equal(calls.length, 1);

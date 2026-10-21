@@ -77,7 +77,9 @@ ship here, under **Fixed**. Upgrade guide: README, "Upgrading from 3.x".
   `glpi_get_session_info`.
 - `glpi_search_tickets`: `"me"` for `assigned_user_id`, `requester_user_id`
   and the new `observer_user_id`, resolved once from the session's `glpiID`
-  and cached; the `my_open_tickets` prompt uses it.
+  and cached; the `my_open_tickets` prompt uses it. The actor filters use
+  GLPI's standard search-option ids (requester 4, technician 5, observer
+  66): the three options share one uid, so they cannot be resolved by name.
 - Entity and profile switching: `glpi_set_active_entity` (id or `"all"`,
   `is_recursive`) and `glpi_set_active_profile`.
 - New parameters: `type` and `time_to_resolve` on `glpi_update_ticket`;

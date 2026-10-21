@@ -180,7 +180,11 @@ deletes carry `destructiveHint: true`. Every tool rejects unknown arguments.
 | `glpi_attach_document_to_ticket` | W | `ticket_id`, `document_id` | Link an existing Document to a ticket |
 
 `"me"` is the connected account: its id is read once from the GLPI session
-(`glpiID`) and cached for the life of the process.
+(`glpiID`) and cached for the life of the process. The actor filters use the
+standard search-option ids 4 (requester), 5 (technician) and 66 (observer):
+the three options share one uid and column, so unlike the other filters they
+cannot be resolved through `listSearchOptions`. On a GLPI where they were
+renumbered, filter with `glpi_search_v2`.
 
 `itemtype` on the timeline and on followup/task/solution is `Ticket`
 (default), `Change` or `Problem`; `ticket_id` / `id` is then the id of that

@@ -92,9 +92,6 @@ export function timelineEntry(
 // "me": the User id of the connected account
 // ---------------------------------------------------------------------------
 
-/** Ticket search option of the observer (watcher) user; actor options share a uid, so the id stays static. */
-const OBSERVER_USER_FIELD = 66;
-
 /** Actor filter: a User id, or "me" for the account this server is connected as. */
 const actorId = (description?: string) => {
   const schema = z
@@ -180,7 +177,8 @@ const searchTickets = defineTool({
       push({ field: await f('requester_user'), searchtype: 'equals', value: await actorValue(client, q.requester_user_id) });
     }
     if (q.observer_user_id !== undefined) {
-      push({ field: OBSERVER_USER_FIELD, searchtype: 'equals', value: await actorValue(client, q.observer_user_id) });
+      // Static id 66, like requester 4 and technician 5: see TICKET_FIELD_REFS (tool-helpers.ts).
+      push({ field: await f('observer_user'), searchtype: 'equals', value: await actorValue(client, q.observer_user_id) });
     }
     if (q.category_id !== undefined) push({ field: await f('category'), searchtype: 'equals', value: q.category_id });
     if (q.entity_id !== undefined) push({ field: await f('entity'), searchtype: 'equals', value: q.entity_id });
