@@ -49,7 +49,7 @@ test('shortKeyForUid: own column -> field, joined -> last two segments', () => {
   assert.equal(shortKeyForUid('Ticket', 'Ticket.Ticket_User.User.name'), 'user_name');
 });
 
-test('mapRowKeys renames numeric keys and suffixes collisions with the option id', async () => {
+test('mapRowKeys gives well-known Ticket options friendly keys', async () => {
   const cat = await catalogue();
   const rows = mapRowKeys('Ticket', [
     { 2: 42, 1: 'Printer down', 12: 2, 4: 'alice', 5: 'bob', 7: 'Hardware > Printer', 80: 'Root', 999: 'x' },
@@ -58,18 +58,33 @@ test('mapRowKeys renames numeric keys and suffixes collisions with the option id
     id: 42,
     name: 'Printer down',
     status: 2,
-    user_name_4: 'alice',
-    user_name_5: 'bob',
-    itilcategory_completename: 'Hardware > Printer',
-    entity_completename: 'Root',
+    requester_name: 'alice',
+    technician_name: 'bob',
+    category: 'Hardware > Printer',
+    entity: 'Root',
     999: 'x',
   });
+});
+
+test('mapRowKeys suffixes colliding generic keys with the option id', async () => {
+  // Same catalogue under another itemtype: no friendly overrides apply.
+  const cat = await catalogue();
+  const rows = mapRowKeys('Computer', [{ 4: 'alice', 5: 'bob' }], cat);
+  assert.deepEqual(rows[0], { user_name_4: 'alice', user_name_5: 'bob' });
+});
+
+test('friendly keys are skipped when the option id points at another column', async () => {
+  installFetch(async () =>
+    new Response(JSON.stringify({ 12: { name: 'Other', field: 'foo', uid: 'Ticket.foo' } }), { status: 200 })
+  );
+  const cat = await new SearchOptionsCache(new GlpiHttp({ url: 'https://glpi.test', userToken: 'u' })).get('Ticket');
+  assert.deepEqual(mapRowKeys('Ticket', [{ 12: 1 }], cat)[0], { foo: 1 });
 });
 
 test('mapRowKeys also handles uid keys (uid_cols) and keeps id as id', async () => {
   const cat = await catalogue();
   const rows = mapRowKeys('Ticket', [{ id: 1, 'Ticket.status': 5, 'Ticket.Entity.completename': 'Root' }], cat);
-  assert.deepEqual(rows[0], { id: 1, status: 5, entity_completename: 'Root' });
+  assert.deepEqual(rows[0], { id: 1, status: 5, entity: 'Root' });
   const map = buildKeyMap('Ticket', ['Ticket.id', '2'], cat);
   assert.equal(map.get('Ticket.id'), 'id');
   assert.equal(map.get('2'), 'id_2', 'a second "id" column does not overwrite the first');

@@ -352,6 +352,18 @@ export interface GlpiDocument {
   entities_id: number;
 }
 
+export interface ItilTaskOptions {
+  is_private?: boolean;
+  /** Seconds spent. */
+  actiontime?: number;
+  /** 0 = information, 1 = to do, 2 = done. */
+  state?: number;
+  users_id_tech?: number;
+  groups_id_tech?: number;
+  begin?: string;
+  end?: string;
+}
+
 /** Relation between two tickets, read as "ticket <relation> other ticket". */
 export type TicketRelation = 'link' | 'duplicate' | 'child_of' | 'parent_of';
 
@@ -443,7 +455,8 @@ export class GlpiClient {
   // ---- generic CRUD helpers ----
 
   private toQuery(o: ListOptions | GetOptions): Record<string, string> {
-    const q: Record<string, string> = {};
+    // HATEOAS `links` arrays are pure noise for a model: never ask for them.
+    const q: Record<string, string> = { get_hateoas: 'false' };
     if ('range' in o && o.range) q.range = o.range;
     if ('sort' in o && o.sort !== undefined) q.sort = String(o.sort);
     if ('order' in o && o.order) q.order = o.order;
@@ -493,6 +506,14 @@ export class GlpiClient {
   }
 
   async getItems<T>(itemtype: string, options: ListOptions = {}): Promise<T[]> {
+    return (await this.getItemsPage<T>(itemtype, options)).items;
+  }
+
+  /**
+   * One page of `GET /{itemtype}` plus the total row count, read from the
+   * `Content-Range: start-end/total` header (absent when the list is empty).
+   */
+  async getItemsPage<T>(itemtype: string, options: ListOptions = {}): Promise<{ items: T[]; totalcount: number }> {
     if (options.sort !== undefined) {
       options = { ...options, sort: await this.resolveSortField(itemtype, options.sort) };
     }
@@ -502,8 +523,11 @@ export class GlpiClient {
         params.append(`searchText[${k}]`, v);
       }
     }
-    const { data } = await this.http.request<T[]>(itemtype, { query: params });
-    return data ?? [];
+    const { data, headers } = await this.http.request<T[]>(itemtype, { query: params });
+    const items = Array.isArray(data) ? data : [];
+    const total = parseContentRangeTotal(headers.get('content-range'));
+    const start = parseInt(String(options.range ?? '0').split('-')[0], 10) || 0;
+    return { items, totalcount: total ?? start + items.length };
   }
 
   async getItem<T>(itemtype: string, id: number, options: GetOptions = {}): Promise<T> {
@@ -587,83 +611,66 @@ export class GlpiClient {
     return this.deleteItem('Ticket', id, force);
   }
 
-  async addTicketFollowup(
-    ticketId: number,
+  async addTicketFollowup(ticketId: number, content: string, isPrivate: boolean = false): Promise<{ id: number }> {
+    return this.addItilFollowup('Ticket', ticketId, content, isPrivate);
+  }
+
+  async addTicketTask(ticketId: number, content: string, options: ItilTaskOptions = {}): Promise<{ id: number }> {
+    return this.addItilTask('Ticket', ticketId, content, options);
+  }
+
+  async addTicketSolution(ticketId: number, content: string, solutiontypes_id?: number): Promise<{ id: number }> {
+    return this.addItilSolution('Ticket', ticketId, content, solutiontypes_id);
+  }
+
+  /** Followup (ITILFollowup, polymorphic) on a Ticket, Change or Problem. */
+  async addItilFollowup(
+    itemtype: ItilItemtype,
+    id: number,
     content: string,
     isPrivate: boolean = false
   ): Promise<{ id: number }> {
-    const { data } = await this.http.request<{ id: number } | Array<{ id: number }>>(
-      'ITILFollowup',
-      {
-        method: 'POST',
-        json: {
-          input: {
-            itemtype: 'Ticket',
-            items_id: ticketId,
-            content,
-            is_private: isPrivate ? 1 : 0,
-          },
-        },
-      }
-    );
-    return Array.isArray(data) ? data[0] : data;
+    return this.createItem('ITILFollowup', {
+      itemtype,
+      items_id: id,
+      content,
+      is_private: isPrivate ? 1 : 0,
+    });
   }
 
-  async addTicketTask(
-    ticketId: number,
+  /** Task in the itemtype's own table: TicketTask.tickets_id, ChangeTask.changes_id, ProblemTask.problems_id. */
+  async addItilTask(
+    itemtype: ItilItemtype,
+    id: number,
     content: string,
-    options: {
-      is_private?: boolean;
-      actiontime?: number;
-      state?: number;
-      users_id_tech?: number;
-      groups_id_tech?: number;
-      begin?: string;
-      end?: string;
-    } = {}
+    options: ItilTaskOptions = {}
   ): Promise<{ id: number }> {
-    const { data } = await this.http.request<{ id: number } | Array<{ id: number }>>(
-      'TicketTask',
-      {
-        method: 'POST',
-        json: {
-          input: {
-            tickets_id: ticketId,
-            content,
-            is_private: options.is_private ? 1 : 0,
-            actiontime: options.actiontime ?? 0,
-            state: options.state ?? 1,
-            users_id_tech: options.users_id_tech,
-            groups_id_tech: options.groups_id_tech,
-            begin: options.begin,
-            end: options.end,
-          },
-        },
-      }
-    );
-    return Array.isArray(data) ? data[0] : data;
+    return this.createItem(`${itemtype}Task`, {
+      [`${itemtype.toLowerCase()}s_id`]: id,
+      content,
+      is_private: options.is_private ? 1 : 0,
+      actiontime: options.actiontime ?? 0,
+      state: options.state ?? 1,
+      users_id_tech: options.users_id_tech,
+      groups_id_tech: options.groups_id_tech,
+      begin: options.begin,
+      end: options.end,
+    });
   }
 
-  async addTicketSolution(
-    ticketId: number,
+  /** Solution (ITILSolution, polymorphic) on a Ticket, Change or Problem. */
+  async addItilSolution(
+    itemtype: ItilItemtype,
+    id: number,
     content: string,
     solutiontypes_id?: number
   ): Promise<{ id: number }> {
-    const { data } = await this.http.request<{ id: number } | Array<{ id: number }>>(
-      'ITILSolution',
-      {
-        method: 'POST',
-        json: {
-          input: {
-            itemtype: 'Ticket',
-            items_id: ticketId,
-            content,
-            solutiontypes_id: solutiontypes_id ?? 0,
-          },
-        },
-      }
-    );
-    return Array.isArray(data) ? data[0] : data;
+    return this.createItem('ITILSolution', {
+      itemtype,
+      items_id: id,
+      content,
+      solutiontypes_id: solutiontypes_id ?? 0,
+    });
   }
 
   // ---- ITIL sub-items (shared by Ticket / Change / Problem) ----
@@ -677,25 +684,37 @@ export class GlpiClient {
   // Ids are NOT shared across itemtypes: Ticket #12 and Change #12 are
   // unrelated records, so callers must always name the itemtype.
 
+  /**
+   * Rows of a sub-resource (`Ticket/12/ITILFollowup`), dropdowns expanded
+   * (author/technician names instead of ids), without HATEOAS links.
+   */
+  async getSubItems(path: string, options: { expand_dropdowns?: boolean } = {}): Promise<unknown[]> {
+    const query: Record<string, string> = { get_hateoas: 'false' };
+    if (options.expand_dropdowns !== false) query.expand_dropdowns = 'true';
+    const { data } = await this.http.request<unknown[]>(path, { query });
+    return Array.isArray(data) ? data : [];
+  }
+
   async getItilFollowups(itemtype: ItilItemtype, id: number) {
-    const { data } = await this.http.request<unknown[]>(`${itemtype}/${id}/ITILFollowup`);
-    return data ?? [];
+    return this.getSubItems(`${itemtype}/${id}/ITILFollowup`);
   }
 
   async getItilTasks(itemtype: ItilItemtype, id: number) {
-    const { data } = await this.http.request<unknown[]>(`${itemtype}/${id}/${itemtype}Task`);
-    return data ?? [];
+    return this.getSubItems(`${itemtype}/${id}/${itemtype}Task`);
   }
 
   async getItilSolutions(itemtype: ItilItemtype, id: number) {
-    const { data } = await this.http.request<unknown[]>(`${itemtype}/${id}/ITILSolution`);
-    return data ?? [];
+    return this.getSubItems(`${itemtype}/${id}/ITILSolution`);
   }
 
   async getItilValidations(itemtype: ItilItemtype, id: number): Promise<unknown[]> {
     if (itemtype === 'Problem') return []; // GLPI has no ProblemValidation
-    const { data } = await this.http.request<unknown[]>(`${itemtype}/${id}/${itemtype}Validation`);
-    return data ?? [];
+    return this.getSubItems(`${itemtype}/${id}/${itemtype}Validation`);
+  }
+
+  /** Document links (Document_Item rows) of an ITIL object. */
+  async getItilDocuments(itemtype: ItilItemtype, id: number) {
+    return this.getSubItems(`${itemtype}/${id}/Document_Item`);
   }
 
   async getTicketFollowups(ticketId: number) {
@@ -755,8 +774,7 @@ export class GlpiClient {
   }
 
   async getTicketDocuments(ticketId: number) {
-    const { data } = await this.http.request<unknown[]>(`Ticket/${ticketId}/Document_Item`);
-    return data ?? [];
+    return this.getItilDocuments('Ticket', ticketId);
   }
 
   /**
@@ -1248,10 +1266,7 @@ export class GlpiClient {
   // ---- SATISFACTION ----
 
   async getTicketSatisfaction(ticketId: number) {
-    const { data } = await this.http.request<unknown[]>(
-      `Ticket/${ticketId}/TicketSatisfaction`
-    );
-    return data ?? [];
+    return this.getSubItems(`Ticket/${ticketId}/TicketSatisfaction`, { expand_dropdowns: false });
   }
 
   // ---- LINKS ----
@@ -1378,5 +1393,21 @@ export class GlpiClient {
   async getFullSession() {
     const { data } = await this.http.request<unknown>('getFullSession');
     return data;
+  }
+
+  /** Switch the active entity of the (process-wide) session; 'all' = every entity of the profile. */
+  async changeActiveEntities(entitiesId: number | 'all', isRecursive = false): Promise<void> {
+    await this.http.request('changeActiveEntities', {
+      method: 'POST',
+      json: { entities_id: entitiesId, is_recursive: isRecursive },
+    });
+  }
+
+  /** Switch the active profile of the (process-wide) session. */
+  async changeActiveProfile(profilesId: number): Promise<void> {
+    await this.http.request('changeActiveProfile', {
+      method: 'POST',
+      json: { profiles_id: profilesId },
+    });
   }
 }

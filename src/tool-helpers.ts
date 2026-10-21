@@ -322,8 +322,8 @@ const SUMMARY_COLUMNS: Array<[TicketFieldKey, string]> = [
   ['priority', 'priority'],
   ['date', 'date'],
   ['date_mod', 'date_mod'],
-  ['entity', 'entity_completename'],
-  ['category', 'itilcategory_completename'],
+  ['entity', 'entity'],
+  ['category', 'category'],
 ];
 
 /**

@@ -53,6 +53,8 @@ export interface SearchOptions {
   expandDropdowns?: boolean;
   /** Pass `giveItems=true` to receive raw items. */
   giveItems?: boolean;
+  /** true = search ONLY deleted (trashed) rows. */
+  isDeleted?: boolean;
 }
 
 export interface SearchResponse<T = Record<string, unknown>> {
@@ -82,6 +84,51 @@ export function shortKeyForUid(itemtype: string, uid: string): string {
 }
 
 /**
+ * Friendly keys for well-known search options, keyed by option id, with the
+ * SQL column the option must point at (so a renumbered catalogue never gets
+ * a wrong name). Actor options share one uid (requester 4 and technician 5
+ * are both "Ticket.Ticket_User.User.name"), so the id is the only way to
+ * tell them apart.
+ */
+const ITIL_COMMON_KEYS: Record<number, readonly [string, string]> = {
+  1: ['name', 'name'],
+  2: ['id', 'id'],
+  7: ['category', 'completename'],
+  12: ['status', 'status'],
+  15: ['date', 'date'],
+  19: ['date_mod', 'date_mod'],
+  80: ['entity', 'completename'],
+};
+
+export const FRIENDLY_SEARCH_KEYS: Record<string, Record<number, readonly [string, string]>> = {
+  Ticket: {
+    ...ITIL_COMMON_KEYS,
+    3: ['priority', 'priority'],
+    4: ['requester_name', 'name'],
+    5: ['technician_name', 'name'],
+    8: ['technician_group', 'completename'],
+    10: ['urgency', 'urgency'],
+    16: ['closedate', 'closedate'],
+    17: ['solvedate', 'solvedate'],
+    18: ['time_to_resolve', 'time_to_resolve'],
+    21: ['content', 'content'],
+    65: ['observer_group', 'completename'],
+    66: ['observer_name', 'name'],
+    71: ['requester_group', 'completename'],
+  },
+  Change: ITIL_COMMON_KEYS,
+  Problem: ITIL_COMMON_KEYS,
+};
+
+function friendlyKey(itemtype: string, optionId: number | undefined, field: string | undefined): string | undefined {
+  if (optionId === undefined) return undefined;
+  const entry = FRIENDLY_SEARCH_KEYS[itemtype]?.[optionId];
+  if (!entry) return undefined;
+  // Only when the option is the expected column (or unknown to the catalogue).
+  return field === undefined || field === entry[1] ? entry[0] : undefined;
+}
+
+/**
  * Build the key-renaming table for a set of row keys.
  *
  * Keys are either numeric option ids (GLPI's default) or option uids (when
@@ -100,6 +147,9 @@ export function buildKeyMap(
     const option = /^\d+$/.test(key) ? catalogue.byId.get(parseInt(key, 10)) : catalogue.byUid.get(key);
     const uid = option?.uid ?? (/^\d+$/.test(key) ? undefined : key);
     if (key === 'id') return { key, short: 'id', own: true, optionId: undefined as number | undefined };
+    const numericId = option?.id ?? (/^\d+$/.test(key) ? parseInt(key, 10) : undefined);
+    const friendly = friendlyKey(itemtype, numericId, option?.field);
+    if (friendly) return { key, short: friendly, own: true, optionId: numericId };
     if (!uid) {
       // Option without uid: fall back to its column name, else keep the key.
       return { key, short: option?.field ?? key, own: false, optionId: option?.id };
@@ -225,6 +275,7 @@ export class GlpiSearch {
     if (options.order) params.append('order', options.order);
     if (options.expandDropdowns) params.append('expand_dropdowns', 'true');
     if (options.giveItems) params.append('giveItems', 'true');
+    if (options.isDeleted) params.append('is_deleted', '1');
 
     const { data, headers } = await this.http.request<{
       totalcount?: number;
