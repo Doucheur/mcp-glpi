@@ -143,12 +143,12 @@ loopback — startup logs a warning in that case.
 
 | Tool | Description |
 |---|---|
-| `glpi_list_tickets` | List with `start`/`limit`/`range`/`sort`/`order`/`status` |
+| `glpi_list_tickets` | List with `start`/`limit`/`range`/`sort`/`order`/`status` (`sort` = column name such as `date_mod`, or a search-option id of the same table) |
 | `glpi_get_ticket` | Detail + status/urgency labels + counts of linked items |
-| `glpi_get_ticket_timeline` | Followups + tasks + solutions + validations, chronological |
+| `glpi_get_ticket_timeline` | Followups + tasks + solutions + validations, chronological. `itemtype` = `Ticket` (default), `Change` or `Problem` |
 | `glpi_search_tickets` | High-level search (status, assigned, requester, dates, ...) |
 | `glpi_get_ticket_followups` | Followups of a ticket |
-| `glpi_get_ticket_tasks` | Tasks |
+| `glpi_get_ticket_tasks` | Tasks (`TicketTask`, tickets only — see `glpi_get_change_tasks` / `glpi_get_problem_tasks`) |
 | `glpi_get_ticket_solutions` | Solutions |
 | `glpi_get_ticket_validations` | Validations (approvals) |
 | `glpi_get_ticket_documents` | Linked documents |
@@ -176,8 +176,13 @@ loopback — startup logs a warning in that case.
 
 | Tool | Description |
 |---|---|
-| `glpi_list_problems` / `glpi_get_problem` / `glpi_create_problem` / `glpi_update_problem` | Problem management |
-| `glpi_list_changes` / `glpi_get_change` / `glpi_create_change` / `glpi_update_change` | Change management |
+| `glpi_list_problems` / `glpi_get_problem` / `glpi_create_problem` / `glpi_update_problem` | Problem management (`get` includes followup/task/solution counts) |
+| `glpi_get_problem_tasks` | Tasks of a problem (`ProblemTask`) |
+| `glpi_list_changes` / `glpi_get_change` / `glpi_create_change` / `glpi_update_change` | Change management (`get` includes followup/task/solution/validation counts) |
+| `glpi_get_change_tasks` | Tasks of a change (`ChangeTask`) |
+| `glpi_get_ticket_timeline` with `itemtype: "Change"` or `"Problem"` | Chronological timeline of a change / problem |
+
+Ids are per itemtype: Ticket #12, Change #12 and Problem #12 are unrelated records, so the `glpi_get_ticket_*` tools must not be used with a change or problem id.
 
 ### Assets
 
@@ -252,22 +257,48 @@ cover provisioning.
 | 4 | High |
 | 5 | Very high |
 
-### Change status
+### Problem status
+
+Same numbering as tickets for 1–6 (`CommonITILObject` constants), plus:
 
 | ID | Label |
 |---|---|
 | 1 | New |
-| 2 | Evaluation |
-| 3 | Approval |
-| 4 | Accepted |
-| 5 | Pending |
-| 6 | Test |
-| 7 | Qualification |
-| 8 | Applied |
-| 9 | Review |
-| 10 | Closed |
-| 11 | Refused |
-| 12 | Canceled |
+| 2 | Processing (assigned) |
+| 3 | Processing (planned) |
+| 4 | Pending |
+| 5 | Solved |
+| 6 | Closed |
+| 7 | Accepted |
+| 8 | Under observation |
+
+### Change status
+
+GLPI's `Change::getAllStatusArray()` values — the ids are not in workflow order:
+
+| ID | Label |
+|---|---|
+| 1 | New |
+| 9 | Evaluation |
+| 10 | Approval |
+| 7 | Accepted |
+| 4 | Pending |
+| 11 | Testing |
+| 12 | Qualification |
+| 5 | Applied (solved) |
+| 8 | Review (under observation) |
+| 6 | Closed |
+| 13 | Refused |
+| 14 | Cancelled |
+
+### Sorting list tools
+
+`glpi_list_*` tools call `GET /{itemtype}`, which sorts by **column name**
+(`date_mod`, `status`, `entities_id`, ...). A numeric `sort` is accepted and
+resolved to its column through `listSearchOptions`, but only for options of
+the itemtype's own table; a joined field (requester name, category label)
+returns a clear error — use `glpi_search_v2` with a search-option id for
+those.
 
 ## Development
 

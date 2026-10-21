@@ -46,6 +46,15 @@ import {
   startHttpMcpServer,
 } from './http-server.js';
 import { SearchCriterion, SearchType, SearchLink } from './search.js';
+import {
+  CHANGE_STATUS,
+  ItilItemtype,
+  PROBLEM_STATUS,
+  TICKET_STATUS,
+  TICKET_URGENCY,
+  VALIDATION_STATUS,
+  isItilItemtype,
+} from './itil.js';
 
 /** Keep in sync with package.json (see CLAUDE.md). */
 const SERVER_VERSION = '3.4.0';
@@ -58,7 +67,7 @@ const listArgsSchema = z.object({
   start: z.number().int().min(0).optional(),
   limit: z.number().int().min(1).max(10000).optional(),
   range: z.string().optional(),
-  sort: z.string().optional(),
+  sort: z.union([z.number().int().min(1), z.string().min(1)]).optional(),
   order: z.enum(['ASC', 'DESC']).optional(),
   expand_dropdowns: z.boolean().optional(),
   criteria: z.array(z.unknown()).optional(),
@@ -91,36 +100,7 @@ const ticketSearchSchema = z.object({
 // Constants
 // ---------------------------------------------------------------------------
 
-const TICKET_STATUS: Record<number, string> = {
-  1: 'New',
-  2: 'Processing (assigned)',
-  3: 'Processing (planned)',
-  4: 'Pending',
-  5: 'Solved',
-  6: 'Closed',
-};
-
-const TICKET_URGENCY: Record<number, string> = {
-  1: 'Very low',
-  2: 'Low',
-  3: 'Medium',
-  4: 'High',
-  5: 'Very high',
-};
-
-const PROBLEM_STATUS: Record<number, string> = {
-  1: 'New', 2: 'Accepted', 3: 'Planned', 4: 'Pending', 5: 'Solved', 6: 'Closed',
-};
-
-const CHANGE_STATUS: Record<number, string> = {
-  1: 'New', 2: 'Evaluation', 3: 'Approval', 4: 'Accepted', 5: 'Pending',
-  6: 'Test', 7: 'Qualification', 8: 'Applied', 9: 'Review', 10: 'Closed',
-  11: 'Refused', 12: 'Canceled',
-};
-
-const VALIDATION_STATUS: Record<number, string> = {
-  1: 'Waiting', 2: 'Granted', 3: 'Refused',
-};
+// Status / urgency labels: see src/itil.ts (GLPI CommonITILObject constants).
 
 // Standard Ticket search-option field ids (GLPI ≥ 9.5). Fallbacks; the
 // SearchOptions cache is used to resolve friendly names dynamically.
@@ -206,7 +186,7 @@ function parseListArgs(args: Record<string, unknown> | undefined): ListOptions {
     opts.range = '0-49';
   }
 
-  if (args.sort !== undefined) opts.sort = args.sort as number;
+  if (args.sort !== undefined) opts.sort = args.sort as number | string;
   if (args.order) opts.order = args.order as 'ASC' | 'DESC';
   if (args.is_deleted !== undefined) opts.is_deleted = args.is_deleted as boolean;
   if (args.include_deleted !== undefined) opts.is_deleted = args.include_deleted as boolean;
@@ -297,7 +277,11 @@ const LIST_TOOL_COMMON_PROPS = {
   start: { type: 'number', description: 'Offset (default 0)' },
   limit: { type: 'number', description: 'Max rows in this call (default 50)' },
   range: { type: 'string', description: 'Explicit "START-END" range; overrides start/limit' },
-  sort: { type: 'number', description: 'Sort by field id (search option id)' },
+  sort: {
+    type: ['string', 'number'],
+    description:
+      'Sort column of the itemtype table (e.g. "date_mod", "status", "entities_id"), or a search-option id of that same table (resolved to its column). Joined fields (requester name, category label) cannot be sorted on here — use glpi_search_v2.',
+  },
   order: { type: 'string', enum: ['ASC', 'DESC'] },
   expand_dropdowns: { type: 'boolean', description: 'Resolve FK ids to labels (default true)' },
 };
@@ -385,10 +369,13 @@ const handleListTools = async (): Promise<ListToolsResult> => {
     },
     {
       name: 'glpi_get_ticket_timeline',
-      description: 'Full chronological timeline of a ticket: followups + tasks + solutions + validations, sorted by date.',
+      description: 'Full chronological timeline of a Ticket, Change or Problem: followups + tasks + solutions + validations, sorted by date. Set itemtype for changes/problems (ids are not shared between itemtypes).',
       inputSchema: {
         type: 'object',
-        properties: { id: { type: 'number' } },
+        properties: {
+          id: { type: 'number' },
+          itemtype: { type: 'string', enum: ['Ticket', 'Change', 'Problem'], description: 'Default Ticket' },
+        },
         required: ['id'],
       },
     },
@@ -426,7 +413,7 @@ const handleListTools = async (): Promise<ListToolsResult> => {
     },
     {
       name: 'glpi_get_ticket_tasks',
-      description: 'List tasks of a ticket.',
+      description: 'List tasks (TicketTask) of a ticket. Ticket only: for a Change or Problem use glpi_get_change_tasks / glpi_get_problem_tasks (a Change id passed here would return the tasks of the unrelated Ticket with that number).',
       inputSchema: { type: 'object', properties: { ticket_id: { type: 'number' } }, required: ['ticket_id'] },
     },
     {
@@ -653,8 +640,13 @@ const handleListTools = async (): Promise<ListToolsResult> => {
     },
     {
       name: 'glpi_get_problem',
-      description: 'Get a problem with status label.',
+      description: 'Get a problem with status label and counts of followups/tasks/solutions.',
       inputSchema: { type: 'object', properties: { id: { type: 'number' } }, required: ['id'] },
+    },
+    {
+      name: 'glpi_get_problem_tasks',
+      description: 'List tasks (ProblemTask) of a problem.',
+      inputSchema: { type: 'object', properties: { problem_id: { type: 'number' } }, required: ['problem_id'] },
     },
     {
       name: 'glpi_create_problem',
@@ -676,7 +668,8 @@ const handleListTools = async (): Promise<ListToolsResult> => {
         type: 'object',
         properties: {
           id: { type: 'number' }, name: { type: 'string' }, content: { type: 'string' },
-          status: { type: 'number' }, urgency: { type: 'number' },
+          status: { type: 'number', description: '1 New, 2 Processing (assigned), 3 Processing (planned), 4 Pending, 5 Solved, 6 Closed, 7 Accepted, 8 Under observation' },
+          urgency: { type: 'number' },
         },
         required: ['id'],
       },
@@ -688,8 +681,13 @@ const handleListTools = async (): Promise<ListToolsResult> => {
     },
     {
       name: 'glpi_get_change',
-      description: 'Get a change with status label.',
+      description: 'Get a change with status label and counts of followups/tasks/solutions/validations.',
       inputSchema: { type: 'object', properties: { id: { type: 'number' } }, required: ['id'] },
+    },
+    {
+      name: 'glpi_get_change_tasks',
+      description: 'List tasks (ChangeTask) of a change.',
+      inputSchema: { type: 'object', properties: { change_id: { type: 'number' } }, required: ['change_id'] },
     },
     {
       name: 'glpi_create_change',
@@ -711,7 +709,7 @@ const handleListTools = async (): Promise<ListToolsResult> => {
         type: 'object',
         properties: {
           id: { type: 'number' }, name: { type: 'string' }, content: { type: 'string' },
-          status: { type: 'number' },
+          status: { type: 'number', description: '1 New, 9 Evaluation, 10 Approval, 7 Accepted, 4 Pending, 11 Testing, 12 Qualification, 5 Applied, 8 Review, 6 Closed, 13 Refused, 14 Cancelled' },
         },
         required: ['id'],
       },
@@ -1196,11 +1194,15 @@ const handleCallTool = async (request: CallToolRequest): Promise<CallToolResult>
       case 'glpi_get_ticket_timeline': {
         const id = args.id as number;
         if (!id) throw new McpError(ErrorCode.InvalidParams, 'id required');
+        const itemtype: ItilItemtype = args.itemtype === undefined ? 'Ticket' : (args.itemtype as ItilItemtype);
+        if (!isItilItemtype(itemtype)) {
+          throw new McpError(ErrorCode.InvalidParams, 'itemtype must be Ticket, Change or Problem');
+        }
         const [followups, tasks, solutions, validations] = await Promise.all([
-          client.getTicketFollowups(id),
-          client.getTicketTasks(id),
-          client.getTicketSolutions(id),
-          client.getTicketValidations(id),
+          client.getItilFollowups(itemtype, id),
+          client.getItilTasks(itemtype, id),
+          client.getItilSolutions(itemtype, id),
+          client.getItilValidations(itemtype, id),
         ]);
         const timeline = [
           ...followups.map((f: any) => ({ kind: 'followup', date: f.date_creation ?? f.date, ...f })),
@@ -1213,7 +1215,13 @@ const handleCallTool = async (request: CallToolRequest): Promise<CallToolResult>
             ...v,
           })),
         ].sort((a, b) => (a.date ?? '').localeCompare(b.date ?? ''));
-        return text({ ticket_id: id, count: timeline.length, timeline });
+        return text({
+          itemtype,
+          id,
+          ...(itemtype === 'Ticket' ? { ticket_id: id } : {}),
+          count: timeline.length,
+          timeline,
+        });
       }
 
       case 'glpi_search_tickets': {
@@ -1482,12 +1490,24 @@ const handleCallTool = async (request: CallToolRequest): Promise<CallToolResult>
       }
       case 'glpi_get_problem': {
         const id = args.id as number;
-        const p = await client.getProblem(id);
+        if (!id) throw new McpError(ErrorCode.InvalidParams, 'id required');
+        const [p, followups, tasks, solutions] = await Promise.all([
+          client.getProblem(id),
+          client.getItilFollowups('Problem', id),
+          client.getItilTasks('Problem', id),
+          client.getItilSolutions('Problem', id),
+        ]);
         return text({
           ...p,
           status_label: PROBLEM_STATUS[(p as any).status],
           urgency_label: TICKET_URGENCY[(p as any).urgency],
+          counts: { followups: followups.length, tasks: tasks.length, solutions: solutions.length },
         });
+      }
+      case 'glpi_get_problem_tasks': {
+        const id = args.problem_id as number;
+        if (!id) throw new McpError(ErrorCode.InvalidParams, 'problem_id required');
+        return text(await client.getProblemTasks(id));
       }
       case 'glpi_create_problem': {
         const result = await client.createProblem({
@@ -1521,12 +1541,30 @@ const handleCallTool = async (request: CallToolRequest): Promise<CallToolResult>
       }
       case 'glpi_get_change': {
         const id = args.id as number;
-        const c = await client.getChange(id);
+        if (!id) throw new McpError(ErrorCode.InvalidParams, 'id required');
+        const [c, followups, tasks, solutions, validations] = await Promise.all([
+          client.getChange(id),
+          client.getItilFollowups('Change', id),
+          client.getItilTasks('Change', id),
+          client.getItilSolutions('Change', id),
+          client.getItilValidations('Change', id),
+        ]);
         return text({
           ...c,
           status_label: CHANGE_STATUS[(c as any).status],
           urgency_label: TICKET_URGENCY[(c as any).urgency],
+          counts: {
+            followups: followups.length,
+            tasks: tasks.length,
+            solutions: solutions.length,
+            validations: validations.length,
+          },
         });
+      }
+      case 'glpi_get_change_tasks': {
+        const id = args.change_id as number;
+        if (!id) throw new McpError(ErrorCode.InvalidParams, 'change_id required');
+        return text(await client.getChangeTasks(id));
       }
       case 'glpi_create_change': {
         const result = await client.createChange({

@@ -14,6 +14,7 @@
  *   - Bug fixes from v2 audit: is_active filter, group assignment, stats.
  */
 
+import type { ItilItemtype } from './itil.js';
 import { GlpiHttp, GlpiHttpConfig } from './http.js';
 import { GlpiSearch, SearchCriterion } from './search.js';
 import { SearchOptionsCache } from './search-options.js';
@@ -358,8 +359,13 @@ export interface GlpiDocument {
 export interface ListOptions {
   /** "START-END" range, e.g. "0-49". Default: "0-49". */
   range?: string;
-  /** Field id to sort by. */
-  sort?: number;
+  /**
+   * Sort column. `GET /{itemtype}` sorts by *column name* (e.g. "date_mod"),
+   * unlike `search/`, which takes a search-option id. A numeric id is
+   * translated to its column through the SearchOptions catalogue in
+   * `getItems()`; a string is passed through as-is.
+   */
+  sort?: number | string;
   order?: 'ASC' | 'DESC';
   is_deleted?: boolean;
   expand_dropdowns?: boolean;
@@ -440,7 +446,37 @@ export class GlpiClient {
     return q;
   }
 
+  /**
+   * Translate a `sort` argument for `GET /{itemtype}` into a column name.
+   *
+   * The list endpoint rejects search-option ids ("sort param is not a field
+   * of glpi_changes", HTTP 400), so numeric ids are looked up in the
+   * SearchOptions catalogue. Only options of the itemtype's own table can be
+   * used: a joined column (requester name, category label, ...) is not a
+   * column of `glpi_<itemtype>s` and the endpoint cannot sort on it.
+   */
+  async resolveSortField(itemtype: string, sort: number | string): Promise<string> {
+    if (typeof sort === 'string' && !/^\d+$/.test(sort.trim())) return sort.trim();
+    const id = typeof sort === 'number' ? sort : parseInt(sort, 10);
+    const catalogue = await this.searchOptions.get(itemtype);
+    const option = catalogue.byId.get(id);
+    if (!option?.field) {
+      throw new Error(`sort: unknown search option ${id} for ${itemtype}; pass a column name instead`);
+    }
+    const ownTable = option.uid ? option.uid === `${itemtype}.${option.field}` : true;
+    if (!ownTable) {
+      throw new Error(
+        `sort: search option ${id} ("${option.name}") is a joined field, not a column of ${itemtype}; ` +
+          'GET /{itemtype} can only sort on its own columns (e.g. "date_mod", "status", "entities_id")'
+      );
+    }
+    return option.field;
+  }
+
   async getItems<T>(itemtype: string, options: ListOptions = {}): Promise<T[]> {
+    if (options.sort !== undefined) {
+      options = { ...options, sort: await this.resolveSortField(itemtype, options.sort) };
+    }
     const params = new URLSearchParams(this.toQuery(options));
     if (options.searchText) {
       for (const [k, v] of Object.entries(options.searchText)) {
@@ -611,26 +647,60 @@ export class GlpiClient {
     return Array.isArray(data) ? data[0] : data;
   }
 
-  async getTicketFollowups(ticketId: number) {
-    const { data } = await this.http.request<unknown[]>(`Ticket/${ticketId}/ITILFollowup`);
+  // ---- ITIL sub-items (shared by Ticket / Change / Problem) ----
+  //
+  // Each ITIL type keeps its tasks and validations in its own table:
+  //   Ticket  -> TicketTask,  TicketValidation
+  //   Change  -> ChangeTask,  ChangeValidation
+  //   Problem -> ProblemTask, (no validation object in GLPI)
+  // Followups and solutions are polymorphic (ITILFollowup / ITILSolution)
+  // and are read through the parent item's sub-resource URL.
+  // Ids are NOT shared across itemtypes: Ticket #12 and Change #12 are
+  // unrelated records, so callers must always name the itemtype.
+
+  async getItilFollowups(itemtype: ItilItemtype, id: number) {
+    const { data } = await this.http.request<unknown[]>(`${itemtype}/${id}/ITILFollowup`);
     return data ?? [];
+  }
+
+  async getItilTasks(itemtype: ItilItemtype, id: number) {
+    const { data } = await this.http.request<unknown[]>(`${itemtype}/${id}/${itemtype}Task`);
+    return data ?? [];
+  }
+
+  async getItilSolutions(itemtype: ItilItemtype, id: number) {
+    const { data } = await this.http.request<unknown[]>(`${itemtype}/${id}/ITILSolution`);
+    return data ?? [];
+  }
+
+  async getItilValidations(itemtype: ItilItemtype, id: number): Promise<unknown[]> {
+    if (itemtype === 'Problem') return []; // GLPI has no ProblemValidation
+    const { data } = await this.http.request<unknown[]>(`${itemtype}/${id}/${itemtype}Validation`);
+    return data ?? [];
+  }
+
+  async getTicketFollowups(ticketId: number) {
+    return this.getItilFollowups('Ticket', ticketId);
   }
 
   async getTicketTasks(ticketId: number) {
-    const { data } = await this.http.request<unknown[]>(`Ticket/${ticketId}/TicketTask`);
-    return data ?? [];
+    return this.getItilTasks('Ticket', ticketId);
   }
 
   async getTicketSolutions(ticketId: number) {
-    const { data } = await this.http.request<unknown[]>(`Ticket/${ticketId}/ITILSolution`);
-    return data ?? [];
+    return this.getItilSolutions('Ticket', ticketId);
   }
 
   async getTicketValidations(ticketId: number) {
-    const { data } = await this.http.request<unknown[]>(
-      `Ticket/${ticketId}/TicketValidation`
-    );
-    return data ?? [];
+    return this.getItilValidations('Ticket', ticketId);
+  }
+
+  async getChangeTasks(changeId: number) {
+    return this.getItilTasks('Change', changeId);
+  }
+
+  async getProblemTasks(problemId: number) {
+    return this.getItilTasks('Problem', problemId);
   }
 
   async getTicketDocuments(ticketId: number) {

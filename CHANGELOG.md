@@ -1,6 +1,36 @@
 # Changelog
 
-## 3.4.0 — 2026-10-14
+## 3.4.0 — 2026-10-21
+
+### Fixed (issue #9 — Change / Problem coverage)
+
+- **Change and Problem tasks are now readable**: new `glpi_get_change_tasks`
+  (`GET /Change/{id}/ChangeTask`) and `glpi_get_problem_tasks`
+  (`GET /Problem/{id}/ProblemTask`). Previously only `TicketTask` was reachable,
+  and passing a change id to `glpi_get_ticket_tasks` silently returned the
+  tasks of the unrelated *ticket* with the same number. The ticket tool's
+  description now says so.
+- **`glpi_get_ticket_timeline` accepts `itemtype`** (`Ticket` default,
+  `Change`, `Problem`): followups, tasks, solutions and validations are read
+  from the right sub-resources (`ChangeTask`, `ChangeValidation`, ...;
+  problems have no validation object in GLPI).
+- `glpi_get_change` / `glpi_get_problem` now return `counts` of followups,
+  tasks, solutions (and validations for changes), like `glpi_get_ticket`.
+- **Change status labels were wrong**: the map assumed a 1..12 sequence, but
+  GLPI uses `CommonITILObject` constants (Applied=5, Closed=6, Accepted=7,
+  Review=8, Evaluation=9, Approval=10, Testing=11, Qualification=12,
+  Refused=13, Cancelled=14). A solved change (5) was labelled "Pending".
+- **Problem status labels**: 2 is "Processing (assigned)" (was "Accepted"),
+  7 "Accepted" and 8 "Under observation" were missing.
+- **`sort` on `glpi_list_*` returned HTTP 400** (`sort param is not a field of
+  glpi_changes`): `GET /{itemtype}` sorts by column name, not by search-option
+  id. `sort` now accepts a column name (`"date_mod"`) or a search-option id,
+  which is resolved to its column through the SearchOptions catalogue (own
+  table only; joined fields return a clear error). The zod schema also
+  accepted only strings while the JSON schema advertised numbers, so numeric
+  sorts on `glpi_list_tickets` failed validation.
+- Status labels and ITIL itemtype helpers moved to `src/itil.ts` and are unit
+  tested (`test/itil.test.ts`).
 
 ### Added
 
