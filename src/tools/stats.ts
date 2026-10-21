@@ -8,23 +8,21 @@ import { TICKET_STATUS } from '../itil.js';
 import { text } from '../output.js';
 import { TICKET_FIELDS, monthBuckets, monthCriteria, ticketField } from '../tool-helpers.js';
 import { defineTool, type ToolDef } from './registry.js';
-import { DATE_DESC, optId, optStr } from './common.js';
+import { DATE, optId, optStr } from './common.js';
 
 const ticketsStatsBy = defineTool({
   name: 'glpi_tickets_stats_by',
   title: 'Ticket statistics',
   toolset: 'stats',
-  description:
-    'Ticket counts broken down by status (default), category, technician, entity or month, optionally for an entity and an opening-date period. ' +
-    'dimension=month covers date_from..date_to (default the last 6 months, max 36).',
+  description: 'Ticket counts by status, category, technician, entity or month, optionally per entity and opening period.',
   inputSchema: {
     dimension: z
       .enum(['status', 'category', 'technician', 'entity', 'month'])
       .optional()
-      .describe('Breakdown (default status)'),
-    date_from: optStr(`Opened after, ${DATE_DESC}`),
-    date_to: optStr(`Opened before, ${DATE_DESC}`),
-    entity_id: optId('Entity id (0 = root entity)'),
+      .describe('Default status; month: last 6 by default, max 36'),
+    date_from: optStr(`Opened after ${DATE}`),
+    date_to: optStr(`Opened before ${DATE}`),
+    entity_id: optId('Entity id (0 = root)'),
   },
   handler: async ({ client }, a) => {
     const dimension = a.dimension ?? 'status';
@@ -79,7 +77,7 @@ const assetStats = defineTool({
   name: 'glpi_get_asset_stats',
   title: 'Asset statistics',
   toolset: 'stats',
-  description: 'Number of computers, monitors, printers, network equipments, phones and software in the active entities.',
+  description: 'Count computers, monitors, printers, network equipment, phones and software.',
   inputSchema: {},
   handler: async ({ client }) => {
     const stats = await client.getAssetStats();

@@ -161,28 +161,39 @@ export function selectTools(defs: readonly ToolDef[], aliases: readonly AliasDef
 // Registration
 // ---------------------------------------------------------------------------
 
-/**
- * Zod schemas accepted by a tool but not advertised in tools/list (legacy
- * parameter names kept for v3 callers). Mark them with `hidden()`.
- */
-const hiddenSchemas = new WeakSet<z.ZodTypeAny>();
+type Json = Record<string, unknown>;
 
+/**
+ * Parameters whose advertised JSON schema differs from the zod one used for
+ * validation: `null` = accepted but not listed (`hidden()`), otherwise the
+ * JSON schema listed instead of the generated one (`advertisedAs()`).
+ */
+const advertised = new WeakMap<z.ZodTypeAny, Json | null>();
+
+/** Accepted by the tool, not listed in tools/list (legacy v3 parameter names). */
 export function hidden<T extends z.ZodTypeAny>(schema: T): T {
-  hiddenSchemas.add(schema);
+  advertised.set(schema, null);
   return schema;
 }
 
-type Json = Record<string, unknown>;
+/** Validated by `schema`, listed as `json` (e.g. a long enum listed once elsewhere). */
+export function advertisedAs<T extends z.ZodTypeAny>(schema: T, json: Json): T {
+  advertised.set(schema, json);
+  return schema;
+}
 
 /**
  * Trim the advertised JSON schema to what helps a model choose arguments.
  * Validation is unaffected: arguments are checked against the strict zod
  * object, not against this schema.
  *   - drops $schema, `additionalProperties: false`, empty `required`;
- *   - drops `minLength: 1` / `minItems: 1` (non-empty is implied);
+ *   - drops `minLength: 1` / `minItems: 1` (non-empty is implied) and
+ *     `minimum: 0` (ids, offsets and caps are never negative);
+ *   - writes integer `exclusiveMinimum: n` as `minimum: n + 1`;
  *   - drops descriptions on anyOf/oneOf branches when the parent has one;
- *   - drops `default` when the description already states the default.
- * Keeps type, enum, const, required, minimum/maximum, items.
+ *   - drops `default` when the description already states the default;
+ *   - merges an anyOf of bare types into a type list.
+ * Keeps type, enum, const, required, other minimum/maximum, items.
  */
 export function slimJsonSchema(node: unknown): unknown {
   if (Array.isArray(node)) return node.map(slimJsonSchema);
@@ -193,6 +204,13 @@ export function slimJsonSchema(node: unknown): unknown {
     if (key === 'additionalProperties' && value === false) continue;
     if (key === 'required' && Array.isArray(value) && value.length === 0) continue;
     if ((key === 'minLength' || key === 'minItems') && value === 1) continue;
+    // Ids, offsets and caps are never negative: `minimum: 0` tells nothing.
+    if (key === 'minimum' && value === 0) continue;
+    // Positive integers: `minimum: 1` says the same as `exclusiveMinimum: 0`, shorter.
+    if (key === 'exclusiveMinimum' && typeof value === 'number' && (node as Json).type === 'integer') {
+      out.minimum = Math.floor(value) + 1;
+      continue;
+    }
     if (key === 'properties' && value && typeof value === 'object') {
       const props: Json = {};
       for (const [name, prop] of Object.entries(value as Json)) props[name] = slimJsonSchema(prop);
@@ -215,6 +233,15 @@ export function slimJsonSchema(node: unknown): unknown {
     }
     if ('default' in out && /default/i.test(description)) delete out.default;
   }
+  // anyOf of bare types -> one type list: {"type":["integer","string"]}.
+  const anyOf = out.anyOf;
+  if (
+    Array.isArray(anyOf) &&
+    anyOf.every((b) => b && typeof b === 'object' && Object.keys(b).length === 1 && typeof (b as Json).type === 'string')
+  ) {
+    delete out.anyOf;
+    out.type = anyOf.map((b) => (b as Json).type);
+  }
   return out;
 }
 
@@ -235,11 +262,16 @@ const ANNOTATION_DEFAULTS: Required<ToolAnnotations> = {
   openWorldHint: true,
 };
 
-/** Annotations as listed: keys equal to the MCP default are omitted. */
+/**
+ * Annotations as listed: keys equal to the MCP default are omitted, and so is
+ * openWorldHint. It is false for every tool (only the configured GLPI is
+ * reached), but a missing hint means "open world", the cautious reading, and
+ * no client relaxes anything on false: 46 copies of it are not worth sending.
+ */
 export function listedAnnotations(annotations: ToolAnnotations): ToolAnnotations {
   const out: ToolAnnotations = {};
   for (const [key, value] of Object.entries(annotations) as Array<[keyof ToolAnnotations, boolean | undefined]>) {
-    if (value === undefined || value === ANNOTATION_DEFAULTS[key]) continue;
+    if (value === undefined || value === ANNOTATION_DEFAULTS[key] || key === 'openWorldHint') continue;
     // destructive/idempotent hints are meaningless on read-only tools.
     if (annotations.readOnlyHint && (key === 'destructiveHint' || key === 'idempotentHint')) continue;
     out[key] = value;
@@ -258,7 +290,9 @@ function schemasOf(def: ToolDef) {
     const properties = raw.properties as Json | undefined;
     if (properties) {
       for (const [name, schema] of Object.entries(def.inputSchema)) {
-        if (hiddenSchemas.has(schema)) delete properties[name];
+        const listedAs = advertised.get(schema);
+        if (listedAs === null) delete properties[name];
+        else if (listedAs) properties[name] = listedAs;
       }
       if (Array.isArray(raw.required)) {
         raw.required = raw.required.filter((name) => typeof name === 'string' && name in properties);

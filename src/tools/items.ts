@@ -7,9 +7,9 @@ import { z } from 'zod';
 import { ErrorCode, McpError } from '@modelcontextprotocol/sdk/types.js';
 import type { GetOptions } from '../glpi-client.js';
 import { compactItem, listEnvelope, text } from '../output.js';
-import { defineTool, type ToolDef } from './registry.js';
+import { advertisedAs, defineTool, type ToolDef } from './registry.js';
 import { checkPurge } from './tickets.js';
-import { id, listShape, optBool, optInt, textShape, toListOptions } from './common.js';
+import { fields, id, listShape, optBool, optInt, textShape, toListOptions, verbose } from './common.js';
 
 const invalid = (message: string) => new McpError(ErrorCode.InvalidParams, message);
 
@@ -20,9 +20,16 @@ export const ITEMTYPES = [
 ] as const;
 export type Itemtype = (typeof ITEMTYPES)[number];
 
-const itemtypeSchema = z
-  .enum(ITEMTYPES)
-  .describe('GLPI itemtype (case-sensitive). Ids are per itemtype.');
+const itemtypeSchema = z.enum(ITEMTYPES);
+/**
+ * Write tools validate the same enum but list it as a string: the 24 values
+ * are already listed by glpi_list_items / glpi_get_item, and an invalid
+ * itemtype is rejected with the allowed values.
+ */
+const itemtypeWriteSchema = advertisedAs(z.enum(ITEMTYPES), {
+  type: 'string',
+  description: 'Itemtype, as in glpi_list_items',
+});
 
 /** Sub-resources glpi_get_item can embed (GLPI `with_*` query flags). */
 export const WITH_FLAGS = [
@@ -59,27 +66,20 @@ function checkInput(itemtype: Itemtype, input: Record<string, unknown>, allowed?
   }
 }
 
-const inputSchema = z
-  .record(z.unknown())
-  .describe('Fields as GLPI expects them (column names: name, comment, locations_id, states_id...). Booleans as 0/1.');
+const inputSchema = z.record(z.unknown()).describe('GLPI columns, e.g. {"name":"PC-42","locations_id":3}; booleans 0/1');
 
 const listItems = defineTool({
   name: 'glpi_list_items',
   title: 'List items',
   toolset: 'assets',
   description:
-    'List items of an itemtype (computers, printers, KB articles, contracts, groups, entities...). ' +
-    'Returns {totalcount,start,count,next_start,items} with a compact projection. ' +
-    'For filters beyond search_text use glpi_search_v2.',
+    'List items of one itemtype (assets, KB, contracts, groups, entities...) as compact rows. For criteria use glpi_search_v2.',
   inputSchema: {
     itemtype: itemtypeSchema,
     ...listShape,
-    search_text: z
-      .record(z.string())
-      .optional()
-      .describe('Column filters {column: "text"} (substring match; "^x$" for exact), e.g. {"name": "PC-"}'),
-    fields: z.array(z.string()).min(1).optional().describe('Keys to return instead of the default projection'),
-    verbose: optBool('All fields, as GLPI sends them'),
+    search_text: z.record(z.string()).optional().describe('{column: "substring"}; "^x$" for exact'),
+    fields,
+    verbose,
     ...textShape,
   },
   handler: async ({ client }, a) => {
@@ -95,14 +95,12 @@ const getItem = defineTool({
   name: 'glpi_get_item',
   title: 'Get item',
   toolset: 'assets',
-  description:
-    'One item of any itemtype, compact by default (verbose for every field). ' +
-    'with embeds related data, e.g. ["networkports","softwares","documents","infocoms","contracts","tickets"].',
+  description: 'One item of any itemtype, compact, optionally with related data (ports, software, documents...).',
   inputSchema: {
     itemtype: itemtypeSchema,
-    id: id('Item id'),
-    with: z.array(z.enum(WITH_FLAGS)).optional().describe('Related data to embed (GLPI with_* flags)'),
-    verbose: optBool('All fields, as GLPI sends them'),
+    id: id(),
+    with: z.array(z.enum(WITH_FLAGS)).optional().describe('Related data to embed'),
+    verbose,
     ...textShape,
   },
   handler: async ({ client }, a) => {
@@ -117,9 +115,9 @@ const createItem = defineTool({
   name: 'glpi_create_item',
   title: 'Create item',
   toolset: 'assets',
-  description: 'Create an item of any itemtype from GLPI fields, e.g. {itemtype:"Computer", input:{name:"PC-42", locations_id:3}}. Returns its id.',
+  description: 'Create an item of any itemtype from GLPI column values and return its id.',
   inputSchema: {
-    itemtype: itemtypeSchema,
+    itemtype: itemtypeWriteSchema,
     input: inputSchema,
   },
   handler: async ({ client }, a) => {
@@ -133,11 +131,10 @@ const updateItem = defineTool({
   name: 'glpi_update_item',
   title: 'Update item',
   toolset: 'assets',
-  description:
-    'Change fields of an item. Computer, Project, Ticket, Problem and Change accept only their usual editable fields (listed in the error otherwise).',
+  description: 'Change the given fields of an item; Computer, Project, Ticket, Problem and Change allow only their usual fields.',
   inputSchema: {
-    itemtype: itemtypeSchema,
-    id: id('Item id'),
+    itemtype: itemtypeWriteSchema,
+    id: id(),
     input: inputSchema,
   },
   handler: async ({ client }, a) => {
@@ -153,13 +150,12 @@ const deleteItem = defineTool({
   name: 'glpi_delete_item',
   title: 'Delete item',
   toolset: 'assets',
-  description:
-    'Move an item to the trash (recoverable). purge=true deletes it permanently and requires confirm_id equal to id.',
+  description: 'Trash an item (recoverable); purge=true with confirm_id=id deletes it for good.',
   inputSchema: {
-    itemtype: itemtypeSchema,
-    id: id('Item id'),
-    purge: optBool('Delete permanently (irreversible); needs confirm_id'),
-    confirm_id: optInt('Repeat the item id to confirm a purge'),
+    itemtype: itemtypeWriteSchema,
+    id: id(),
+    purge: optBool('Delete permanently; needs confirm_id'),
+    confirm_id: optInt('Same id, to confirm a purge'),
   },
   handler: async ({ client }, a) => {
     const purge = checkPurge(a.id, a.purge, a.confirm_id);

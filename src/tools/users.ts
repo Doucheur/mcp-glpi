@@ -7,17 +7,17 @@ import { z } from 'zod';
 import type { GlpiUser } from '../glpi-client.js';
 import { compactItem, listEnvelope, stripLinks, text } from '../output.js';
 import { defineTool, type ToolDef } from './registry.js';
-import { defined, id, listShape, optBool, optId, optStr, toListOptions } from './common.js';
+import { defined, id, listShape, optBool, optId, optStr, toListOptions, verbose } from './common.js';
 
 const listUsers = defineTool({
   name: 'glpi_list_users',
   title: 'List users',
   toolset: 'users',
-  description: 'List users (active ones by default). Returns {totalcount,start,count,next_start,items}. To find one person use glpi_find_user.',
+  description: 'List users, active ones by default. To find one person prefer glpi_find_user.',
   inputSchema: {
     ...listShape,
-    active_only: optBool('Only active users (default true)'),
-    verbose: optBool('All fields, as GLPI sends them'),
+    active_only: optBool('Default true'),
+    verbose,
   },
   handler: async ({ client }, a) => {
     const { opts, start } = toListOptions(a);
@@ -31,10 +31,10 @@ const getUser = defineTool({
   name: 'glpi_get_user',
   title: 'Get user',
   toolset: 'users',
-  description: 'One user by id (compact; verbose for every field).',
+  description: 'One user by id. To look a person up by name use glpi_find_user.',
   inputSchema: {
-    id: id('User id'),
-    verbose: optBool('All fields, as GLPI sends them'),
+    id: id(),
+    verbose,
   },
   handler: async ({ client }, a) => text(compactItem('User', await client.getUser(a.id), a)),
 });
@@ -43,13 +43,11 @@ const findUser = defineTool({
   name: 'glpi_find_user',
   title: 'Find user',
   toolset: 'users',
-  description:
-    'Find users by login, last name or first name (substring). An exact login match comes first. ' +
-    'exact=true returns only the account with that exact login (or null), and an error if several share it.',
+  description: 'Find users by login, last name or first name substring, exact login first.',
   inputSchema: {
     query: z.string().min(1).describe('Login, last name or first name'),
-    exact: optBool('Exact login match only'),
-    limit: z.number().int().min(1).max(50).optional().describe('Max candidates (default 10)'),
+    exact: optBool('That exact login only (or null)'),
+    limit: z.number().int().min(1).max(50).optional().describe('Default 10'),
   },
   handler: async ({ client }, a) => {
     if (a.exact) {
@@ -85,16 +83,15 @@ const createUser = defineTool({
   name: 'glpi_create_user',
   title: 'Create user',
   toolset: 'admin',
-  description:
-    'Create a user account. No password here: GLPI authentication (LDAP/SSO/invitation) or an administrator sets it.',
+  description: 'Create a user account; no password (LDAP/SSO, invitation or an admin sets it).',
   inputSchema: {
     name: z.string().min(1).describe('Login'),
     realname: optStr('Last name'),
-    firstname: optStr('First name'),
-    email: optStr('E-mail address'),
-    phone: optStr('Phone'),
-    profiles_id: optId('Default profile (Profile id)'),
-    entities_id: optId('Default entity (Entity id)'),
+    firstname: optStr(),
+    email: optStr(),
+    phone: optStr(),
+    profiles_id: optId('Default profile'),
+    entities_id: optId('Default entity'),
   },
   handler: async ({ client }, a) => {
     const result = await client.createUser(defined(a) as Parameters<typeof client.createUser>[0]);
@@ -106,11 +103,11 @@ const addUserToGroup = defineTool({
   name: 'glpi_add_user_to_group',
   title: 'Add user to group',
   toolset: 'admin',
-  description: 'Make a user a member (or manager) of a group.',
+  description: 'Make a user a member, or a manager, of a group.',
   inputSchema: {
-    user_id: id('User id'),
-    group_id: id('Group id'),
-    is_manager: optBool('Group manager'),
+    user_id: id(),
+    group_id: id(),
+    is_manager: optBool(),
   },
   handler: async ({ client }, a) => {
     const result = await client.addUserToGroup(a.user_id, a.group_id, a.is_manager ?? false);
@@ -130,10 +127,9 @@ const getSessionInfo = defineTool({
   name: 'glpi_get_session_info',
   title: 'Get session info',
   toolset: 'session',
-  description:
-    'Who the server is connected as (me), the active profile, the profiles that can be switched to, and the active/available entities.',
+  description: 'Connected user (me), active profile and entity, and the profiles and entities available.',
   inputSchema: {
-    verbose: optBool('Return the raw GLPI answers'),
+    verbose,
   },
   handler: async ({ client }, a) => {
     const [active, profiles, entities, full] = await Promise.all([
@@ -168,20 +164,19 @@ const getSessionInfo = defineTool({
   },
 });
 
-const SHARED_SESSION_NOTE =
-  ' The GLPI session is shared by every client of this server (HTTP mode included): the change applies to all of them.';
+const SHARED_SESSION_NOTE = ' for every client of this server: the session is shared.';
 
 const setActiveEntity = defineTool({
   name: 'glpi_set_active_entity',
   title: 'Set active entity',
   toolset: 'session',
   annotations: { destructiveHint: false },
-  description: 'Switch the active entity of the GLPI session (ids from glpi_get_session_info).' + SHARED_SESSION_NOTE,
+  description: 'Switch the active entity (ids from glpi_get_session_info)' + SHARED_SESSION_NOTE,
   inputSchema: {
     entity_id: z
       .union([z.number().int().min(0), z.literal('all')])
-      .describe('Entity id (0 = root), or "all" for every entity of the profile'),
-    is_recursive: optBool('Include sub-entities (default false)'),
+      .describe('Entity id (0 = root), or "all"'),
+    is_recursive: optBool('With sub-entities'),
   },
   handler: async ({ client }, a) => {
     await client.changeActiveEntities(a.entity_id, a.is_recursive ?? false);
@@ -194,9 +189,9 @@ const setActiveProfile = defineTool({
   title: 'Set active profile',
   toolset: 'session',
   annotations: { destructiveHint: false },
-  description: 'Switch the active profile of the GLPI session (ids from glpi_get_session_info).' + SHARED_SESSION_NOTE,
+  description: 'Switch the active profile (ids from glpi_get_session_info)' + SHARED_SESSION_NOTE,
   inputSchema: {
-    profile_id: id('Profile id'),
+    profile_id: id(),
   },
   handler: async ({ client }, a) => {
     await client.changeActiveProfile(a.profile_id);

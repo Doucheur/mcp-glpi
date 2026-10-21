@@ -9,6 +9,7 @@ import { ErrorCode, McpError } from '@modelcontextprotocol/sdk/types.js';
 import { compactItem, listEnvelope, text } from '../output.js';
 import { defineTool, type ToolDef } from './registry.js';
 import {
+  IMPACT_DESC,
   PRIORITY_DESC,
   STATUS_CHANGE_DESC,
   STATUS_PROBLEM_DESC,
@@ -16,12 +17,12 @@ import {
   defined,
   id,
   listShape,
-  optBool,
   optId,
   optInt,
   optStr,
   textShape,
   toListOptions,
+  verbose,
 } from './common.js';
 
 /** Keys of a problem/change in list results (no content). */
@@ -39,10 +40,10 @@ function itilTools(itemtype: 'Problem' | 'Change'): ToolDef[] {
     name: `glpi_list_${plural}`,
     title: `List ${plural}`,
     toolset: 'itil',
-    description: `List ${plural}, newest first by default. Returns {totalcount,start,count,next_start,items} with status labels.`,
+    description: `List ${plural}, newest first, with status labels. To filter use glpi_search_v2.`,
     inputSchema: {
       ...listShape,
-      verbose: optBool('All fields, as GLPI sends them'),
+      verbose,
     },
     handler: async ({ client }, a) => {
       const { opts, start } = toListOptions(a, 'DESC');
@@ -58,13 +59,10 @@ function itilTools(itemtype: 'Problem' | 'Change'): ToolDef[] {
     name: `glpi_get_${lower}`,
     title: `Get ${lower}`,
     toolset: 'itil',
-    description:
-      `One ${lower} with status/urgency/priority labels, plain-text content and counts of followups/tasks/solutions` +
-      (itemtype === 'Change' ? '/validations' : '') +
-      `. Timeline: glpi_get_ticket_timeline with itemtype ${itemtype}.`,
+    description: `One ${lower} with labels, plain-text content and followup/task/solution counts.`,
     inputSchema: {
-      id: id(`${itemtype} id`),
-      verbose: optBool('All fields, as GLPI sends them'),
+      id: id(),
+      verbose,
       ...textShape,
     },
     handler: async ({ client }, a) => {
@@ -80,15 +78,15 @@ function itilTools(itemtype: 'Problem' | 'Change'): ToolDef[] {
     name: `glpi_create_${lower}`,
     title: `Create ${lower}`,
     toolset: 'itil',
-    description: `Create a ${lower}. Returns its id.`,
+    description: `Create a ${lower} and return its id.`,
     inputSchema: {
       name: z.string().min(1).describe('Title'),
       content: z.string().min(1).describe('Description'),
-      urgency: optInt(`Urgency: ${URGENCY_DESC}`),
-      impact: optInt(`Impact: ${URGENCY_DESC}`),
-      priority: optInt(`Priority: ${PRIORITY_DESC}`),
+      urgency: optInt(URGENCY_DESC),
+      impact: optInt(IMPACT_DESC),
+      priority: optInt(PRIORITY_DESC),
       category_id: optId('ITILCategory id'),
-      entity_id: optId('Entity id (default: active entity)'),
+      entity_id: optId('Entity id (default active)'),
     },
     handler: async ({ client }, a) => {
       const result = await client.createItem(
@@ -111,16 +109,16 @@ function itilTools(itemtype: 'Problem' | 'Change'): ToolDef[] {
     name: `glpi_update_${lower}`,
     title: `Update ${lower}`,
     toolset: 'itil',
-    description: `Change fields of a ${lower}. Only the fields given are written.`,
+    description: `Change the given fields of a ${lower}.`,
     inputSchema: {
-      id: id(`${itemtype} id`),
+      id: id(),
       name: optStr('Title'),
-      content: optStr('Description'),
+      content: optStr(),
       status: optInt(statusDesc),
-      urgency: optInt(`Urgency: ${URGENCY_DESC}`),
-      impact: optInt(`Impact: ${URGENCY_DESC}`),
-      priority: optInt(`Priority: ${PRIORITY_DESC}`),
-      itilcategories_id: optId('ITILCategory id'),
+      urgency: optInt(URGENCY_DESC),
+      impact: optInt(IMPACT_DESC),
+      priority: optInt(PRIORITY_DESC),
+      itilcategories_id: optId(),
     },
     handler: async ({ client }, a) => {
       const { id: itemId, ...fields } = a;

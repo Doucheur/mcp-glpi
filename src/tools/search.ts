@@ -7,7 +7,7 @@ import { z } from 'zod';
 import { pageLimit, text } from '../output.js';
 import { type CriteriaArg, resolveCriteria } from '../tool-helpers.js';
 import { defineTool, type ToolDef } from './registry.js';
-import { optBool, optStr, orderSchema, textShape } from './common.js';
+import { expandDropdowns, isDeleted, optBool, optStr, pageShape, searchPageShape, textShape } from './common.js';
 import { resolveSearchSort, searchEnvelope } from './search-rows.js';
 
 const SEARCHTYPES = [
@@ -18,22 +18,17 @@ const criteriaSchema = z
   .array(
     z
       .object({
-        field: z
-          .union([z.number().int(), z.string().min(1)])
-          .describe('Search option id, or its uid/column/label (see glpi_list_search_options)'),
-        searchtype: z.enum(SEARCHTYPES).describe('Comparison; under/notunder = tree descendants (entities, categories)'),
-        value: z.union([z.string(), z.number(), z.boolean()]).optional().describe('Value to compare (omit for empty/notempty)'),
-        link: z.enum(['AND', 'OR', 'AND NOT', 'OR NOT']).optional().describe('Operator with the previous criterion (default AND)'),
+        field: z.union([z.number().int(), z.string().min(1)]).describe('Search-option id, uid, column or label'),
+        searchtype: z.enum(SEARCHTYPES).describe('under/notunder: tree descendants'),
+        value: z.union([z.string(), z.number(), z.boolean()]).optional().describe('Omit for empty/notempty'),
+        link: z.enum(['AND', 'OR', 'AND NOT', 'OR NOT']).optional().describe('With the previous one (default AND)'),
       })
       .strict()
   )
   .optional()
-  .describe('Criteria combined in order');
+  .describe('See instructions');
 
-const itemtypeArg = z
-  .string()
-  .min(1)
-  .describe('GLPI itemtype, case-sensitive (Ticket, Computer, User, NetworkEquipment, KnowbaseItem...)');
+const itemtypeArg = z.string().min(1).describe('GLPI itemtype, case-sensitive');
 
 function toCriteriaArgs(criteria: z.infer<typeof criteriaSchema>): CriteriaArg[] {
   return (criteria ?? []).map((c) => ({ ...c, value: c.value ?? '' }));
@@ -44,22 +39,14 @@ const searchV2 = defineTool({
   title: 'Search any itemtype',
   toolset: 'search',
   description:
-    'Multi-criteria search on any itemtype. Rows have readable keys. Returns {totalcount,start,count,next_start,items}. ' +
-    'Example: {"itemtype":"Computer","criteria":[{"field":"name","searchtype":"contains","value":"PC-"},' +
-    '{"link":"AND","field":"Computer.Location.completename","searchtype":"contains","value":"Paris"}],"limit":10}. ' +
-    'For tickets prefer glpi_search_tickets.',
+    'Search any itemtype with criteria; rows have readable keys. For tickets prefer glpi_search_tickets.',
   inputSchema: {
     itemtype: itemtypeArg,
     criteria: criteriaSchema,
-    forcedisplay: z.array(z.number().int()).optional().describe('Extra columns to return (search option ids)'),
-    start: z.number().int().min(0).optional().describe('First row (default 0)'),
-    limit: z.number().int().min(1).optional().describe('Rows per page (default 25, max 500)'),
-    sort: z.union([z.number().int().min(1), z.string().min(1)]).optional().describe('Search option id or name to sort on'),
-    order: orderSchema,
-    fetch_all: optBool('Follow pages until totalcount, capped by max_rows'),
-    max_rows: z.number().int().min(1).optional().describe('Cap for fetch_all (default 1000)'),
-    expand_dropdowns: optBool('Dropdown labels instead of ids (default true)'),
-    is_deleted: optBool('true = search ONLY trashed rows'),
+    forcedisplay: z.array(z.number().int()).optional().describe('Extra columns, search-option ids'),
+    ...searchPageShape,
+    expand_dropdowns: expandDropdowns,
+    is_deleted: isDeleted,
     ...textShape,
   },
   handler: async ({ client }, a) => {
@@ -84,10 +71,7 @@ const count = defineTool({
   name: 'glpi_count',
   title: 'Count items',
   toolset: 'search',
-  description:
-    'Number of items matching criteria (cheap, no rows). ' +
-    'Example: {"itemtype":"Ticket","criteria":[{"field":"status","searchtype":"equals","value":"notold"}]} = open tickets ' +
-      '(status also takes "old" = solved+closed, "all", or a number; it does not support lessthan/morethan).',
+  description: 'Count the items matching criteria, without rows.',
   inputSchema: {
     itemtype: itemtypeArg,
     criteria: criteriaSchema,
@@ -102,12 +86,10 @@ const listSearchOptions = defineTool({
   name: 'glpi_list_search_options',
   title: 'List search options',
   toolset: 'search',
-  description:
-    'Searchable fields of an itemtype (id, name, uid, column, datatype, searchtypes), to build glpi_search_v2 / glpi_count criteria. ' +
-    'Use query to filter.',
+  description: 'Searchable fields of an itemtype (id, uid, column, datatype, searchtypes) to build criteria.',
   inputSchema: {
     itemtype: itemtypeArg,
-    query: optStr('Keep options whose name, uid or column contains this text (case-insensitive)'),
+    query: optStr('Filter on name, uid or column'),
   },
   handler: async ({ client }, a) => {
     const cat = await client.searchOptions.get(a.itemtype);
@@ -130,11 +112,10 @@ const searchKnowbase = defineTool({
   name: 'glpi_search_knowbase',
   title: 'Search knowledge base',
   toolset: 'kb',
-  description: 'Find KB articles whose title contains the text. Read one with glpi_get_item {itemtype:"KnowbaseItem", id}.',
+  description: 'Find knowledge base articles by title. Read one with glpi_get_item, itemtype KnowbaseItem.',
   inputSchema: {
-    query: z.string().min(1).describe('Text contained in the title'),
-    start: z.number().int().min(0).optional().describe('First row (default 0)'),
-    limit: z.number().int().min(1).optional().describe('Rows per page (default 25, max 500)'),
+    query: z.string().min(1).describe('Text in the title'),
+    ...pageShape,
     ...textShape,
   },
   handler: async ({ client }, a) => {
@@ -153,12 +134,12 @@ const createKnowbaseItem = defineTool({
   name: 'glpi_create_knowbase_item',
   title: 'Create KB article',
   toolset: 'kb',
-  description: 'Create a knowledge base article. Returns its id.',
+  description: 'Create a knowledge base article and return its id.',
   inputSchema: {
     name: z.string().min(1).describe('Title'),
-    answer: z.string().min(1).describe('Article body (plain text or HTML)'),
-    is_faq: optBool('Publish in the FAQ'),
-    knowbaseitemcategories_id: z.number().int().min(0).optional().describe('KnowbaseItemCategory id'),
+    answer: z.string().min(1).describe('Body, text or HTML'),
+    is_faq: optBool(),
+    knowbaseitemcategories_id: z.number().int().min(0).optional(),
   },
   handler: async ({ client }, a) => {
     const result = await client.createKnowbaseItem({
