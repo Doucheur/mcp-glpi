@@ -44,7 +44,7 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/GMS64260/mcp-glpi.git"
+    "url": "git+https://github.com/GMS64260/mcp-glpi.git"
   },
   "bugs": {
     "url": "https://github.com/GMS64260/mcp-glpi/issues"
