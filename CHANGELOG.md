@@ -89,7 +89,10 @@ ship here, under **Fixed**. Upgrade guide: README, "Upgrading from 3.x".
   tools that return text.
 - Five MCP prompts that spell out the tool sequence and ask the user before
   any write: `triage_ticket`, `daily_report`, `draft_solution`,
-  `kb_from_ticket`, `my_open_tickets`.
+  `kb_from_ticket`, `my_open_tickets`. A prompt is registered only when
+  every tool it names is listed (one stderr note at startup names the
+  skipped ones); `glpi://tickets/*` need the `tickets` toolset,
+  `glpi://problems/open` and `glpi://changes/pending` the `itil` toolset.
 - Resource templates `glpi://ticket/{id}` (ticket and its last 10 timeline
   entries, in the `glpi_get_ticket_timeline` shape), `glpi://kb/{id}` (article as plain text), `glpi://user/{id}`. The
   fixed resources return list envelopes with compact rows.

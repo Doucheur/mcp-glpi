@@ -10,6 +10,7 @@ import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { GlpiClient } from '../src/glpi-client.js';
 import { TICKET_RESOURCE_ENTRY_CHARS, TICKET_RESOURCE_TIMELINE } from '../src/resources.js';
 import { createMcpServer } from '../src/server.js';
+import { parseRegistryOptions } from '../src/tools/registry.js';
 
 interface FetchCall {
   method: string;
@@ -164,4 +165,33 @@ test('glpi://tickets/open uses status notold and returns the list envelope; comp
   assert.equal(computers.totalcount, 42);
   assert.equal(computers.next_start, 1);
   assert.deepEqual(computers.items[0], { id: 1, name: 'PC-1', serial: 'S', computertypes_id: 'Laptop' });
+});
+
+test('ticket, problem and change list resources follow GLPI_TOOLSETS', async () => {
+  const uris = async (env: Record<string, string>) => {
+    const glpi = new GlpiClient({ url: 'https://glpi.test', userToken: 'u', maxRetries: 0 });
+    const server = createMcpServer({ client: glpi, options: parseRegistryOptions(env) });
+    const [clientSide, serverSide] = InMemoryTransport.createLinkedPair();
+    const client = new Client({ name: 'test', version: '0' });
+    await Promise.all([server.connect(serverSide), client.connect(clientSide)]);
+    const { resources } = await client.listResources();
+    const { resourceTemplates } = await client.listResourceTemplates();
+    await client.close();
+    return { fixed: resources.map((r) => r.uri).sort(), templates: resourceTemplates.length };
+  };
+  const all = await uris({});
+  assert.ok(['glpi://tickets/open', 'glpi://tickets/recent', 'glpi://problems/open', 'glpi://changes/pending'].every((u) => all.fixed.includes(u)));
+
+  const assets = await uris({ GLPI_TOOLSETS: 'assets' });
+  assert.ok(!assets.fixed.some((u) => /^glpi:\/\/(tickets|problems|changes)\//.test(u)), assets.fixed.join(' '));
+  assert.ok(assets.fixed.includes('glpi://computers'));
+  assert.equal(assets.templates, all.templates);
+
+  const tickets = await uris({ GLPI_TOOLSETS: 'tickets' });
+  assert.ok(tickets.fixed.includes('glpi://tickets/open') && tickets.fixed.includes('glpi://tickets/recent'));
+  assert.ok(!tickets.fixed.includes('glpi://problems/open') && !tickets.fixed.includes('glpi://changes/pending'));
+
+  const itil = await uris({ GLPI_TOOLSETS: 'itil', GLPI_READ_ONLY: '1' });
+  assert.ok(itil.fixed.includes('glpi://problems/open') && itil.fixed.includes('glpi://changes/pending'));
+  assert.ok(!itil.fixed.includes('glpi://tickets/open'));
 });

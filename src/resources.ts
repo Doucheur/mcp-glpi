@@ -8,6 +8,8 @@
  *   - Templates: `glpi://ticket/{id}` (ticket + last timeline entries),
  *     `glpi://kb/{id}` (article as plain text), `glpi://user/{id}`.
  *
+ * The ticket lists need the `tickets` toolset, the problem and change lists
+ * the `itil` toolset (GLPI_TOOLSETS); the others are always registered.
  * The resource lists never change at runtime: `listChanged: false`.
  */
 
@@ -15,6 +17,7 @@ import { McpServer, ResourceTemplate } from '@modelcontextprotocol/sdk/server/mc
 import { ErrorCode, McpError } from '@modelcontextprotocol/sdk/types.js';
 import type { GlpiClient } from './glpi-client.js';
 import { compactItem, listEnvelope, stripLinks } from './output.js';
+import type { RegistryOptions, Toolset } from './tools/registry.js';
 import {
   OPEN_PROBLEM_STATUSES,
   OPEN_STATUS_VALUE,
@@ -40,6 +43,8 @@ interface ResourceDef {
   name: string;
   title: string;
   description: string;
+  /** Registered only when this toolset is enabled. */
+  toolset?: Toolset;
   read: (client: GlpiClient) => Promise<unknown>;
 }
 
@@ -59,6 +64,7 @@ export const RESOURCES: readonly ResourceDef[] = [
     name: 'open-tickets',
     title: 'Open tickets',
     description: 'Tickets not solved/closed (status notold), 100 most recently updated, readable keys',
+    toolset: 'tickets',
     read: async (client) => {
       const [status, dateMod] = await Promise.all([ticketField(client, 'status'), ticketField(client, 'date_mod')]);
       const result = await client.search.search<Record<string, unknown>>('Ticket', {
@@ -76,6 +82,7 @@ export const RESOURCES: readonly ResourceDef[] = [
     name: 'recent-tickets',
     title: 'Recent tickets',
     description: 'The 20 most recently opened tickets (any status), readable keys',
+    toolset: 'tickets',
     read: async (client) => {
       const result = await client.search.search<Record<string, unknown>>('Ticket', {
         limit: 20,
@@ -91,6 +98,7 @@ export const RESOURCES: readonly ResourceDef[] = [
     name: 'open-problems',
     title: 'Open problems',
     description: 'Problems not solved/closed (status 1,2,3,4,7,8), 50 most recently updated',
+    toolset: 'itil',
     read: async (client) => searchEnvelope('Problem', await searchByStatuses(client, 'Problem', OPEN_PROBLEM_STATUSES)),
   },
   {
@@ -99,6 +107,7 @@ export const RESOURCES: readonly ResourceDef[] = [
     title: 'Pending changes',
     description:
       'Changes not applied/closed/in review/refused/cancelled (status 1,2,3,4,7,9,10,11,12), 50 most recently updated',
+    toolset: 'itil',
     read: async (client) => searchEnvelope('Change', await searchByStatuses(client, 'Change', PENDING_CHANGE_STATUSES)),
   },
   {
@@ -207,8 +216,9 @@ function parseId(value: string | string[] | undefined, uri: string): number {
 
 const json = (uri: URL, value: unknown) => ({ contents: [{ uri: uri.href, mimeType: MIME, text: JSON.stringify(stripLinks(value)) }] });
 
-export function registerResources(server: McpServer, client: GlpiClient): void {
+export function registerResources(server: McpServer, client: GlpiClient, options: RegistryOptions = {}): void {
   for (const r of RESOURCES) {
+    if (r.toolset && options.toolsets && !options.toolsets.has(r.toolset)) continue;
     server.registerResource(r.name, r.uri, { title: r.title, description: r.description, mimeType: MIME }, async (uri) =>
       json(uri, await r.read(client))
     );

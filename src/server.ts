@@ -5,12 +5,12 @@
 
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type { GlpiClient } from './glpi-client.js';
-import { registerPrompts } from './prompts.js';
+import { registerPrompts, skippedPromptsNote } from './prompts.js';
 import { registerResources } from './resources.js';
 import { ALIASES } from './tools/aliases.js';
 import { ITEM_TOOLS } from './tools/items.js';
 import { ITIL_TOOLS } from './tools/itil.js';
-import { type AliasDef, type RegistryOptions, type ToolDef, parseRegistryOptions, registerAll } from './tools/registry.js';
+import { type AliasDef, type RegistryOptions, type ToolDef, parseRegistryOptions, registerAll, selectTools } from './tools/registry.js';
 import { SEARCH_TOOLS } from './tools/search.js';
 import { STATS_TOOLS } from './tools/stats.js';
 import { TICKET_TOOLS } from './tools/tickets.js';
@@ -50,6 +50,14 @@ Lists return {totalcount,start,count,next_start,items}, 25 rows by default (limi
 Text fields come as plain text cut at max_content_chars (default 2000, 0 = no cap) with a "…[truncated, N chars]" marker; raw_html=true returns the stored HTML uncut. Rows are a compact projection: fields picks the keys, verbose=true returns every raw GLPI field.
 Write tools (create, update, delete, add, assign, link, set, upload) change production data: confirm with the user first. Deletes go to the trash; purge=true is permanent and needs confirm_id equal to id.`;
 
+/**
+ * Startup note naming the prompts that `options` leaves without one of their
+ * tools (printed once by the CLI; createMcpServer runs per HTTP request).
+ */
+export function promptStartupNote(options: ServerOptions = {}, tools: readonly ToolDef[] = ALL_TOOLS): string | undefined {
+  return skippedPromptsNote(new Set(selectTools(tools, [], options).tools.map((t) => t.name)));
+}
+
 export interface CreateMcpServerOptions {
   client: GlpiClient;
   options?: ServerOptions;
@@ -62,8 +70,8 @@ export function createMcpServer({ client, options = {}, tools = ALL_TOOLS, alias
     { name: 'mcp-glpi', version: SERVER_VERSION },
     { instructions: INSTRUCTIONS, capabilities: { tools: {}, resources: {} } }
   );
-  registerAll(server, { client, options }, tools, aliases, options);
-  registerResources(server, client);
-  registerPrompts(server, { client, options });
+  const selection = registerAll(server, { client, options }, tools, aliases, options);
+  registerResources(server, client, options);
+  registerPrompts(server, { client, options }, new Set(selection.tools.map((t) => t.name)));
   return server;
 }

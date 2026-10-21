@@ -4,12 +4,13 @@
  * protocol); ids are validated as digits.
  *
  * Prompts only read, then PROPOSE write calls: the model must ask the user
- * before running any of them.
+ * before running any of them. A prompt is registered only when every tool it
+ * names is listed (GLPI_READ_ONLY / GLPI_TOOLSETS can remove some).
  */
 
 import { z } from 'zod';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
-import type { GetPromptResult } from '@modelcontextprotocol/sdk/types.js';
+import { type GetPromptResult, ListPromptsRequestSchema } from '@modelcontextprotocol/sdk/types.js';
 import type { GlpiClient } from './glpi-client.js';
 import { TICKET_PRIORITY, TICKET_STATUS, TICKET_URGENCY } from './itil.js';
 import type { RegistryOptions } from './tools/registry.js';
@@ -225,12 +226,44 @@ export const PROMPTS: readonly PromptDef[] = [
   },
 ];
 
-export function registerPrompts(server: McpServer, _ctx: PromptContext): void {
+/** Tool names a prompt's workflow mentions (its text built with sample arguments, minus the shared reference block). */
+export function promptTools(p: PromptDef): string[] {
+  const built = p.build({ id: '1' });
+  const text = built.messages
+    .map((m) => (m.content as { text?: string }).text ?? '')
+    .join('\n')
+    .replace(STATUS_REFERENCE, '');
+  return [...new Set([...text.matchAll(/\bglpi_[a-z0-9_]+/g)].map((m) => m[0]))].sort();
+}
+
+/** Prompts that name a tool missing from `listed`, with the missing names. */
+export function skippedPrompts(listed: ReadonlySet<string>): Array<{ name: string; missing: string[] }> {
+  return PROMPTS.map((p) => ({ name: p.name, missing: promptTools(p).filter((t) => !listed.has(t)) })).filter(
+    (s) => s.missing.length > 0
+  );
+}
+
+/** One stderr line for startup, or undefined when every prompt is available. */
+export function skippedPromptsNote(listed: ReadonlySet<string>): string | undefined {
+  const skipped = skippedPrompts(listed);
+  if (skipped.length === 0) return undefined;
+  return (
+    'Note: prompts skipped because a tool they use is not listed (GLPI_READ_ONLY / GLPI_TOOLSETS): ' +
+    skipped.map((s) => `${s.name} (${s.missing.join(', ')})`).join('; ')
+  );
+}
+
+/** Register the prompts whose tools are all in `listed` (default: all prompts). */
+export function registerPrompts(server: McpServer, _ctx: PromptContext, listed?: ReadonlySet<string>): void {
+  const skipped = new Set(listed ? skippedPrompts(listed).map((s) => s.name) : []);
   for (const p of PROMPTS) {
+    if (skipped.has(p.name)) continue;
     server.registerPrompt(p.name, { title: p.title, description: p.description, argsSchema: p.argsSchema }, (args: unknown) =>
       p.build((args ?? {}) as Record<string, string | undefined>)
     );
   }
   // McpServer advertises listChanged: true; the prompt set is fixed.
   server.server.registerCapabilities({ prompts: { listChanged: false } });
+  // McpServer installs the prompts/list handler on the first registerPrompt.
+  if (skipped.size === PROMPTS.length) server.server.setRequestHandler(ListPromptsRequestSchema, async () => ({ prompts: [] }));
 }

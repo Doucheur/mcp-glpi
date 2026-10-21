@@ -332,7 +332,11 @@ unreachable GLPI (`check GLPI_URL`).
 ## Prompts and resources
 
 **Prompts** spell out the tool sequence for common jobs. They only read and
-then propose write calls, which the model must confirm with the user.
+then propose write calls, which the model must confirm with the user. A
+prompt is registered only when every tool it names is listed: with
+`GLPI_READ_ONLY=1` only `daily_report` and `my_open_tickets` remain, and
+`GLPI_TOOLSETS` can drop more. The server names the skipped prompts in one
+stderr line at startup.
 
 | Prompt | Arguments | Workflow |
 |---|---|---|
@@ -342,7 +346,9 @@ then propose write calls, which the model must confirm with the user.
 | `kb_from_ticket` | `id` | Turn a solved ticket into a generic KB article, propose `glpi_create_knowbase_item` (or an update of an existing article) |
 | `my_open_tickets` | none | Open tickets assigned to the connected account (`assigned_user_id: "me"`), overdue first, with the three to handle next |
 
-**Resources** (read-only, `application/json`, same conventions as the tools):
+**Resources** (read-only, `application/json`, same conventions as the tools).
+`glpi://tickets/*` need the `tickets` toolset and `glpi://problems/open` /
+`glpi://changes/pending` the `itil` toolset; the others are always there:
 
 | URI | Content |
 |---|---|

@@ -15,7 +15,7 @@ import {
   parseTransportConfig,
   startHttpMcpServer,
 } from './http-server.js';
-import { SERVER_VERSION, type ServerOptions, createMcpServer, parseServerOptions } from './server.js';
+import { SERVER_VERSION, type ServerOptions, createMcpServer, parseServerOptions, promptStartupNote } from './server.js';
 
 /**
  * The GLPI client is process-wide: one GLPI session shared by every MCP
@@ -103,6 +103,8 @@ async function main() {
 
     const config = parseGlpiConfig(process.env);
     serverOptions = parseServerOptions(process.env);
+    const promptNote = promptStartupNote(serverOptions);
+    if (promptNote) console.error(promptNote);
     client = new GlpiClient(config);
 
     // Try to open the session eagerly, but don't die if GLPI is momentarily

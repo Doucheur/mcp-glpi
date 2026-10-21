@@ -7,8 +7,9 @@ import { test, mock } from 'node:test';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { GlpiClient } from '../src/glpi-client.js';
-import { PROMPTS } from '../src/prompts.js';
-import { ALL_TOOLS, createMcpServer } from '../src/server.js';
+import { PROMPTS, promptTools } from '../src/prompts.js';
+import { ALL_TOOLS, createMcpServer, promptStartupNote } from '../src/server.js';
+import { parseRegistryOptions } from '../src/tools/registry.js';
 
 async function connect() {
   const calls: string[] = [];
@@ -113,4 +114,34 @@ test('every tool named in a prompt exists in the catalogue', () => {
     const t = promptText(p.build({ id: '1' }));
     for (const m of t.matchAll(/\bglpi_[a-z_]+/g)) assert.ok(names.has(m[0]), `${p.name} references unknown tool ${m[0]}`);
   }
+});
+
+test('prompts whose tools are not all listed are skipped, with one startup note', async () => {
+  const listedPrompts = async (env: Record<string, string>) => {
+    const glpi = new GlpiClient({ url: 'https://glpi.test', userToken: 'u', maxRetries: 0 });
+    const server = createMcpServer({ client: glpi, options: parseRegistryOptions(env) });
+    const [clientSide, serverSide] = InMemoryTransport.createLinkedPair();
+    const client = new Client({ name: 'test', version: '0' });
+    await Promise.all([server.connect(serverSide), client.connect(clientSide)]);
+    const { prompts } = await client.listPrompts();
+    await client.close();
+    return prompts.map((p) => p.name).sort();
+  };
+
+  // Read-only drops the write tools that triage/draft/kb propose.
+  assert.deepEqual(await listedPrompts({ GLPI_READ_ONLY: '1' }), ['daily_report', 'my_open_tickets']);
+  // tickets + core: daily_report needs glpi_tickets_stats_by (stats), triage glpi_find_user (users)...
+  assert.deepEqual(await listedPrompts({ GLPI_TOOLSETS: 'tickets' }), ['my_open_tickets']);
+  assert.deepEqual(await listedPrompts({ GLPI_TOOLSETS: 'tickets,users,kb,stats,assets' }).then((p) => p.length), 5);
+  // None left: prompts/list still answers, with an empty list.
+  assert.deepEqual(await listedPrompts({ GLPI_TOOLSETS: 'assets', GLPI_READ_ONLY: '1' }), []);
+
+  assert.equal(promptStartupNote({}), undefined);
+  const note = promptStartupNote(parseRegistryOptions({ GLPI_READ_ONLY: '1' }));
+  assert.ok(note && !note.includes('\n'), 'one line');
+  assert.match(note, /^Note: prompts skipped .*: triage_ticket \(glpi_add_followup, glpi_assign_ticket, glpi_update_ticket\); draft_solution \(glpi_add_followup, glpi_add_solution\); kb_from_ticket/);
+  assert.doesNotMatch(note, /daily_report|my_open_tickets/);
+  assert.deepEqual(promptTools(PROMPTS.find((p) => p.name === 'my_open_tickets')!), [
+    'glpi_get_session_info', 'glpi_list_overdue_tickets', 'glpi_search_tickets',
+  ]);
 });
