@@ -61,6 +61,11 @@ export function describeError(err: unknown): string {
   if (err instanceof GlpiTimeoutError) {
     return `${err.message}\nHint: GLPI did not answer in time. Retry, narrow the request, or raise GLPI_TIMEOUT_MS.`;
   }
+  if (err instanceof TypeError && err.message === 'fetch failed') {
+    const cause = (err as { cause?: { code?: string; message?: string } }).cause;
+    const detail = cause?.code ?? cause?.message ?? 'network error';
+    return `Cannot reach GLPI (${detail}).\nHint: check GLPI_URL and that the GLPI server is reachable from this machine.`;
+  }
   if (err instanceof Error) return err.message;
   return String(err);
 }

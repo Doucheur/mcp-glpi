@@ -100,6 +100,8 @@ test('describeError: GLPI code, path without query, hint', () => {
   assert.equal(res.isError, true);
   assert.match(describeError(new GlpiError({ status: 404, body: 'nope', url: 'https://g/apirest.php/Computer/9', method: 'GET' })), /ids are per itemtype/i);
   assert.equal(describeError(new Error('boom')), 'boom');
+  const network = new TypeError('fetch failed', { cause: Object.assign(new Error('x'), { code: 'ECONNREFUSED' }) });
+  assert.match(describeError(network), /^Cannot reach GLPI \(ECONNREFUSED\)/);
 });
 
 // --- client: get_hateoas + getItemsPage -------------------------------------
