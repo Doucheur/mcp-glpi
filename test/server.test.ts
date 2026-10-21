@@ -16,7 +16,7 @@ import { McpError } from '@modelcontextprotocol/sdk/types.js';
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import { GlpiClient } from '../src/glpi-client.js';
 import { ALL_ALIASES, ALL_TOOLS, INSTRUCTIONS, SERVER_VERSION, createMcpServer } from '../src/server.js';
-import { annotationsOf, parseRegistryOptions, type RegistryOptions, type ToolDef } from '../src/tools/registry.js';
+import { annotationsOf, parseRegistryOptions, slimJsonSchema, type RegistryOptions, type ToolDef } from '../src/tools/registry.js';
 import { text } from '../src/output.js';
 
 // ---------------------------------------------------------------------------
@@ -131,13 +131,60 @@ test('tools/list is exactly the v4 catalogue, without aliases', async () => {
   const aliasNames = new Set(ALL_ALIASES.map((a) => a.name));
   assert.ok(tools.every((t) => !aliasNames.has(t.name)));
   for (const t of tools) {
-    assert.ok(t.title, `${t.name} has a title`);
+    if (t.title !== undefined) assert.notEqual(t.title.toLowerCase(), t.name.replace(/^glpi_/, '').replace(/_/g, ' '));
     assert.ok(t.annotations, `${t.name} has annotations`);
+    assert.equal(t.annotations.openWorldHint, false, `${t.name} openWorldHint`);
     assert.equal((t.inputSchema as Record<string, unknown>).$schema, undefined);
     for (const [key, prop] of Object.entries(t.inputSchema.properties ?? {})) {
       assert.ok((prop as { description?: string }).description, `${t.name}.${key} is described`);
     }
   }
+});
+
+test('listed schemas carry no scaffolding; validation stays strict', async () => {
+  const tools = await listNames();
+  const serialized = JSON.stringify(tools);
+  assert.doesNotMatch(serialized, /"additionalProperties":false/);
+  assert.doesNotMatch(serialized, /"required":\[\]/);
+  assert.doesNotMatch(serialized, /"\$schema"/);
+  const byName = new Map(tools.map((t) => [t.name, t]));
+  // A title that only restates the name is dropped; a different one is kept.
+  assert.equal(byName.get('glpi_list_items')?.title, undefined);
+  assert.equal(byName.get('glpi_get_ticket_timeline')?.title, 'Get ITIL timeline');
+  // Annotations equal to the MCP defaults are omitted.
+  assert.deepEqual(byName.get('glpi_get_ticket')?.annotations, { readOnlyHint: true, openWorldHint: false });
+  assert.deepEqual(byName.get('glpi_create_ticket')?.annotations, { destructiveHint: false, openWorldHint: false });
+  assert.deepEqual(byName.get('glpi_delete_item')?.annotations, { idempotentHint: true, openWorldHint: false });
+  // Enums, types, minimum and required survive.
+  const listItems = byName.get('glpi_list_items')!.inputSchema as { properties: Record<string, Record<string, unknown>>; required: string[] };
+  assert.deepEqual(listItems.required, ['itemtype']);
+  assert.ok(Array.isArray(listItems.properties.itemtype.enum));
+  assert.equal(listItems.properties.start.minimum, 0);
+});
+
+test('slimJsonSchema drops branch descriptions and restated defaults only', () => {
+  const slim = slimJsonSchema({
+    type: 'object',
+    additionalProperties: false,
+    required: [],
+    properties: {
+      a: { anyOf: [{ type: 'string', description: 'x' }, { type: 'integer', minimum: 1 }], description: 'A' },
+      b: { type: 'integer', default: 3, description: 'B (default 3)' },
+      c: { type: 'integer', default: 3, description: 'C' },
+      d: { type: 'string', minLength: 1, maxLength: 9 },
+      e: { type: 'object', additionalProperties: { type: 'string' } },
+    },
+  });
+  assert.deepEqual(slim, {
+    type: 'object',
+    properties: {
+      a: { anyOf: [{ type: 'string' }, { type: 'integer', minimum: 1 }], description: 'A' },
+      b: { type: 'integer', description: 'B (default 3)' },
+      c: { type: 'integer', default: 3, description: 'C' },
+      d: { type: 'string', maxLength: 9 },
+      e: { type: 'object', additionalProperties: { type: 'string' } },
+    },
+  });
 });
 
 test('every v3 tool name is either kept or a hidden alias', () => {
