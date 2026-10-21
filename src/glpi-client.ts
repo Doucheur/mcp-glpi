@@ -352,6 +352,24 @@ export interface GlpiDocument {
   entities_id: number;
 }
 
+/** Relation between two tickets, read as "ticket <relation> other ticket". */
+export type TicketRelation = 'link' | 'duplicate' | 'child_of' | 'parent_of';
+
+/** GLPI `Ticket_Ticket` constants (LINK_TO, DUPLICATE_WITH, SON_OF, PARENT_OF). */
+export const TICKET_LINK_TYPES: Record<TicketRelation, number> = {
+  link: 1,
+  duplicate: 2,
+  child_of: 3,
+  parent_of: 4,
+};
+
+/** Total from a `Content-Range: start-end/total` header, if present. */
+export function parseContentRangeTotal(value: string | null | undefined): number | undefined {
+  if (!value) return undefined;
+  const match = value.match(/\/(\d+)\s*$/);
+  return match ? parseInt(match[1], 10) : undefined;
+}
+
 // ============================================================================
 // LIST / GET OPTIONS
 // ============================================================================
@@ -407,8 +425,9 @@ export class GlpiClient {
 
   constructor(config: GlpiConfig) {
     this.http = new GlpiHttp(config);
-    this.search = new GlpiSearch(this.http);
     this.searchOptions = new SearchOptionsCache(this.http);
+    // Search rows come back keyed by readable names (see mapRowKeys).
+    this.search = new GlpiSearch(this.http, this.searchOptions);
   }
 
   // ---- session ----
@@ -703,13 +722,49 @@ export class GlpiClient {
     return this.getItilTasks('Problem', problemId);
   }
 
+  /**
+   * Count the rows of a sub-resource (e.g. `Ticket/12/ITILFollowup`) without
+   * downloading them: `range=0-0` and read the total from `Content-Range`
+   * ("0-0/N"). GLPI omits the header when the list is empty; if it is missing
+   * while rows came back, fall back to the length of the full list.
+   */
+  async countSubItems(path: string): Promise<number> {
+    const { data, headers } = await this.http.request<unknown[]>(path, { query: { range: '0-0' } });
+    const total = parseContentRangeTotal(headers.get('content-range'));
+    if (total !== undefined) return total;
+    if (!Array.isArray(data) || data.length === 0) return 0;
+    const { data: all } = await this.http.request<unknown[]>(path);
+    return Array.isArray(all) ? all.length : 0;
+  }
+
+  /** Counts of followups / tasks / solutions (/ validations) of an ITIL object. */
+  async countItilChildren(
+    itemtype: ItilItemtype,
+    id: number,
+    withValidations = false
+  ): Promise<{ followups: number; tasks: number; solutions: number; validations?: number }> {
+    const [followups, tasks, solutions, validations] = await Promise.all([
+      this.countSubItems(`${itemtype}/${id}/ITILFollowup`),
+      this.countSubItems(`${itemtype}/${id}/${itemtype}Task`),
+      this.countSubItems(`${itemtype}/${id}/ITILSolution`),
+      withValidations && itemtype !== 'Problem'
+        ? this.countSubItems(`${itemtype}/${id}/${itemtype}Validation`)
+        : Promise.resolve(undefined),
+    ]);
+    return { followups, tasks, solutions, ...(validations !== undefined ? { validations } : {}) };
+  }
+
   async getTicketDocuments(ticketId: number) {
     const { data } = await this.http.request<unknown[]>(`Ticket/${ticketId}/Document_Item`);
     return data ?? [];
   }
 
   /**
-   * Assign ticket to user OR group. F12 fix: groups_id was silently dropped in v2.
+   * Add a user and/or a group to a ticket's actors. When both are given, both
+   * links are created (Ticket_User then Group_Ticket).
+   *
+   * `id` is the first link created (user link if any), kept for callers that
+   * only expect one id.
    */
   async assignTicket(
     ticketId: number,
@@ -719,12 +774,14 @@ export class GlpiClient {
       /** 1=requester, 2=assigned, 3=observer */
       type?: number;
     }
-  ): Promise<{ id: number }> {
+  ): Promise<{ id: number; user_link_id?: number; group_link_id?: number }> {
     if (!options.users_id && !options.groups_id) {
       throw new Error('assignTicket requires users_id or groups_id');
     }
 
     const type = options.type ?? 2;
+    let user_link_id: number | undefined;
+    let group_link_id: number | undefined;
 
     if (options.users_id) {
       const { data } = await this.http.request<{ id: number } | Array<{ id: number }>>(
@@ -734,17 +791,25 @@ export class GlpiClient {
           json: { input: { tickets_id: ticketId, users_id: options.users_id, type } },
         }
       );
-      return Array.isArray(data) ? data[0] : data;
+      user_link_id = (Array.isArray(data) ? data[0] : data)?.id;
     }
 
-    const { data } = await this.http.request<{ id: number } | Array<{ id: number }>>(
-      'Group_Ticket',
-      {
-        method: 'POST',
-        json: { input: { tickets_id: ticketId, groups_id: options.groups_id, type } },
-      }
-    );
-    return Array.isArray(data) ? data[0] : data;
+    if (options.groups_id) {
+      const { data } = await this.http.request<{ id: number } | Array<{ id: number }>>(
+        'Group_Ticket',
+        {
+          method: 'POST',
+          json: { input: { tickets_id: ticketId, groups_id: options.groups_id, type } },
+        }
+      );
+      group_link_id = (Array.isArray(data) ? data[0] : data)?.id;
+    }
+
+    return {
+      id: (user_link_id ?? group_link_id) as number,
+      ...(user_link_id !== undefined ? { user_link_id } : {}),
+      ...(group_link_id !== undefined ? { group_link_id } : {}),
+    };
   }
 
   // ---- PROBLEMS ----
@@ -796,40 +861,45 @@ export class GlpiClient {
   // ---- USERS ----
 
   /**
-   * F10 fix: filter active users via the /search endpoint (criteria field=8, equals)
-   * rather than searchText, which was doing a LIKE on the wrong column.
+   * List users through `GET /User` (same row shape with or without the
+   * filter; honours range/sort/order). `is_active` is applied as an anchored
+   * searchText (`^1$`), which GLPI turns into an exact `LIKE '1'`.
    */
   async getUsers(options: ListOptions & { is_active?: boolean } = {}) {
-    if (options.is_active === undefined) {
-      return this.getItems<GlpiUser>('User', options);
-    }
-    // Use search to apply a proper equals filter on is_active.
-    const result = await this.search.search<GlpiUser>('User', {
-      criteria: [
-        {
-          field: 8, // standard "is_active" search option id for User
-          searchtype: 'equals',
-          value: options.is_active ? 1 : 0,
-        },
-      ],
-      start: options.range ? parseInt(options.range.split('-')[0] ?? '0', 10) : 0,
-      limit: options.range
-        ? parseInt(options.range.split('-')[1] ?? '49', 10) -
-          parseInt(options.range.split('-')[0] ?? '0', 10) +
-          1
-        : 50,
-      expandDropdowns: options.expand_dropdowns ?? true,
+    const { is_active, ...rest } = options;
+    if (is_active === undefined) return this.getItems<GlpiUser>('User', rest);
+    return this.getItems<GlpiUser>('User', {
+      ...rest,
+      searchText: { ...(rest.searchText ?? {}), is_active: is_active ? '^1$' : '^0$' },
     });
-    return result.data;
   }
 
   async getUser(id: number, options: GetOptions = {}) {
     return this.getItem<GlpiUser>('User', id, options);
   }
 
+  /**
+   * Find a user by exact login. Returns null when nobody matches and throws
+   * when several accounts carry that login (ambiguous: use an id instead).
+   */
   async getUserByName(name: string): Promise<GlpiUser | null> {
-    const users = await this.getItems<GlpiUser>('User', { searchText: { name } });
-    return users.length > 0 ? users[0] : null;
+    const login = name.trim();
+    if (!login) return null;
+    const users = await this.getItems<GlpiUser>('User', {
+      range: '0-49',
+      searchText: { name: `^${login}$` },
+    });
+    // LIKE treats "_" and "%" as wildcards and is case-insensitive: re-check.
+    let matches = users.filter((u) => u.name === login);
+    if (matches.length === 0) matches = users.filter((u) => String(u.name).toLowerCase() === login.toLowerCase());
+    if (matches.length === 0) return null;
+    if (matches.length > 1) {
+      throw new Error(
+        `Several users match the login "${login}" (ids ${matches.map((u) => u.id).join(', ')}); ` +
+          'use glpi_get_user with one of these ids'
+      );
+    }
+    return matches[0];
   }
 
   async createUser(user: {
@@ -1179,17 +1249,28 @@ export class GlpiClient {
 
   // ---- LINKS ----
 
-  /** Link two tickets. linkType: 1=link, 2=duplicate, 3=parent (link), 4=son (linked) */
-  async linkTickets(parentId: number, childId: number, linkType: number = 1): Promise<{ id: number }> {
+  /**
+   * Link two tickets with GLPI's `Ticket_Ticket`. `tickets_id_1` is the
+   * subject of the relation: "ticketId <relation> otherTicketId".
+   *   link       LINK_TO (1)        ticketId is linked to otherTicketId
+   *   duplicate  DUPLICATE_WITH (2) ticketId duplicates otherTicketId
+   *   child_of   SON_OF (3)         ticketId is a child of otherTicketId
+   *   parent_of  PARENT_OF (4)      ticketId is the parent of otherTicketId
+   */
+  async linkTickets(
+    ticketId: number,
+    otherTicketId: number,
+    relation: TicketRelation = 'link'
+  ): Promise<{ id: number }> {
     const { data } = await this.http.request<{ id: number } | Array<{ id: number }>>(
       'Ticket_Ticket',
       {
         method: 'POST',
         json: {
           input: {
-            tickets_id_1: parentId,
-            tickets_id_2: childId,
-            link: linkType,
+            tickets_id_1: ticketId,
+            tickets_id_2: otherTicketId,
+            link: TICKET_LINK_TYPES[relation],
           },
         },
       }

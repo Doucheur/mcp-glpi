@@ -1379,7 +1379,10 @@ const handleCallTool = async (request: CallToolRequest): Promise<CallToolResult>
         const parent_id = args.parent_id as number;
         const child_id = args.child_id as number;
         if (!parent_id || !child_id) throw new McpError(ErrorCode.InvalidParams, 'parent_id and child_id required');
-        const result = await client.linkTickets(parent_id, child_id, (args.link_type as number) ?? 1);
+        // parent_id/child_id carry the direction: 3/4 both mean "parent_id is the parent".
+        const legacyRelation = { 1: 'link', 2: 'duplicate', 3: 'parent_of', 4: 'parent_of' } as const;
+        const relation = legacyRelation[((args.link_type as number) ?? 1) as 1 | 2 | 3 | 4] ?? 'link';
+        const result = await client.linkTickets(parent_id, child_id, relation);
         return text({ success: true, link_id: result.id });
       }
 
