@@ -69,7 +69,8 @@ function timelineDate(kind: TimelineKind, row: Record<string, unknown>): string 
   return typeof d === 'string' ? d : '';
 }
 
-function timelineEntry(
+/** One timeline row in the compact shape shared by glpi_get_ticket_timeline and glpi://ticket/{id}. */
+export function timelineEntry(
   kind: TimelineKind,
   raw: unknown,
   opts: { verbose?: boolean; max_content_chars?: number; raw_html?: boolean }

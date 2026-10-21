@@ -14,8 +14,7 @@
 import { McpServer, ResourceTemplate } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { ErrorCode, McpError } from '@modelcontextprotocol/sdk/types.js';
 import type { GlpiClient } from './glpi-client.js';
-import { VALIDATION_STATUS } from './itil.js';
-import { cleanTextFields, compactItem, listEnvelope, stripLinks } from './output.js';
+import { compactItem, listEnvelope, stripLinks } from './output.js';
 import {
   OPEN_PROBLEM_STATUSES,
   OPEN_STATUS_VALUE,
@@ -24,6 +23,7 @@ import {
   ticketField,
 } from './tool-helpers.js';
 import { searchEnvelope } from './tools/search-rows.js';
+import { timelineEntry } from './tools/tickets.js';
 
 const MIME = 'application/json';
 
@@ -142,24 +142,6 @@ export const RESOURCES: readonly ResourceDef[] = [
 // Templates
 // ---------------------------------------------------------------------------
 
-type EntryKind = 'followup' | 'task' | 'solution' | 'validation';
-
-const ENTRY_FIELDS: Record<EntryKind, readonly string[]> = {
-  followup: ['id', 'users_id', 'is_private', 'content'],
-  task: ['id', 'users_id', 'users_id_tech', 'state', 'actiontime', 'is_private', 'content'],
-  solution: ['id', 'users_id', 'status', 'content'],
-  validation: ['id', 'users_id', 'users_id_validate', 'status', 'status_label', 'comment_submission', 'comment_validation'],
-};
-
-function entry(kind: EntryKind, raw: unknown): Record<string, unknown> {
-  const row = stripLinks((raw ?? {}) as Record<string, unknown>);
-  const src = kind === 'validation' ? { ...row, status_label: VALIDATION_STATUS[Number(row.status)] ?? null } : row;
-  const out: Record<string, unknown> = {};
-  for (const k of ENTRY_FIELDS[kind]) if (src[k] !== undefined) out[k] = src[k];
-  const d = kind === 'validation' ? row.submission_date ?? row.date_creation : row.date_creation ?? row.date ?? row.date_mod;
-  return { kind, date: typeof d === 'string' ? d : '', ...cleanTextFields(out, { max_content_chars: TICKET_RESOURCE_ENTRY_CHARS }) };
-}
-
 /** Compact ticket plus its last `TICKET_RESOURCE_TIMELINE` timeline entries (oldest first). */
 export async function readTicketResource(client: GlpiClient, id: number): Promise<Record<string, unknown>> {
   const [ticket, followups, tasks, solutions, validations] = await Promise.all([
@@ -169,11 +151,12 @@ export async function readTicketResource(client: GlpiClient, id: number): Promis
     client.getItilSolutions('Ticket', id),
     client.getItilValidations('Ticket', id),
   ]);
+  const entryOpts = { max_content_chars: TICKET_RESOURCE_ENTRY_CHARS };
   const all = [
-    ...followups.map((r) => entry('followup', r)),
-    ...tasks.map((r) => entry('task', r)),
-    ...solutions.map((r) => entry('solution', r)),
-    ...validations.map((r) => entry('validation', r)),
+    ...followups.map((r) => timelineEntry('followup', r, entryOpts)),
+    ...tasks.map((r) => timelineEntry('task', r, entryOpts)),
+    ...solutions.map((r) => timelineEntry('solution', r, entryOpts)),
+    ...validations.map((r) => timelineEntry('validation', r, entryOpts)),
   ].sort((a, b) => String(a.date).localeCompare(String(b.date)));
   return {
     ...compactItem('Ticket', ticket, { max_content_chars: TICKET_RESOURCE_CONTENT_CHARS }),
