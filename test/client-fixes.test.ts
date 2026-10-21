@@ -144,3 +144,14 @@ test('parseContentRangeTotal', () => {
   assert.equal(parseContentRangeTotal(null), undefined);
   assert.equal(parseContentRangeTotal('bogus'), undefined);
 });
+
+test('createUser sends the e-mail as _useremails (GLPI ignores a plain email field)', async () => {
+  const calls = installFetch(async () => json({ id: 42, message: '' }, { status: 201 }));
+  await client().createUser({ name: 'jdoe', realname: 'Doe', email: 'jdoe@example.org' });
+  assert.equal(calls[0].method, 'POST');
+  assert.equal(new URL(calls[0].url).pathname, '/apirest.php/User');
+  assert.deepEqual(calls[0].body, { input: { name: 'jdoe', realname: 'Doe', _useremails: ['jdoe@example.org'] } });
+
+  await client().createUser({ name: 'nomail' });
+  assert.deepEqual(calls[1].body, { input: { name: 'nomail' } });
+});
