@@ -1,11 +1,24 @@
 /**
  * v3 tool names that v4 folded into other tools. They stay callable (hidden
  * from tools/list unless GLPI_LEGACY_TOOLS=1) and translate their arguments.
+ *
+ * Every argument a v3 tool listed is accepted (checked against the v3.4
+ * catalogue, test/server.test.ts "every alias accepts its v3 arguments"):
+ *   - list aliases: start, limit, range, sort, order, expand_dropdowns
+ *     (glpi_list_items takes them; include_deleted gets an explanatory
+ *     isError, see common.ts);
+ *   - get aliases: id, and with_softwares / with_networkports /
+ *     with_connections / with_documents on the six asset types;
+ *   - create / update aliases: their columns, passed as `input`;
+ *   - glpi_list_tickets: the list arguments plus status;
+ *   - glpi_search: itemtype, field, searchtype, value (plus start, limit,
+ *     range, expand_dropdowns, which v3 ignored).
  */
 
+import { ArgumentError } from '../errors.js';
 import type { AliasDef } from './registry.js';
 import type { TimelineKind } from './tickets.js';
-import { bool01, defined, rangeArgs } from './common.js';
+import { INCLUDE_DELETED_REMOVED, bool01, defined, rangeArgs } from './common.js';
 
 type Args = Record<string, unknown>;
 
@@ -79,6 +92,8 @@ export const ALIASES: AliasDef[] = [
     name: 'glpi_list_tickets',
     target: 'glpi_search_tickets',
     mapArgs: (a) => {
+      if (a.include_deleted !== undefined) throw new ArgumentError(INCLUDE_DELETED_REMOVED);
+      // Search rows always carry labels: expand_dropdowns has no equivalent.
       const { expand_dropdowns: _e, ...rest } = rangeArgs(a);
       return rest;
     },
@@ -141,7 +156,7 @@ export const ALIASES: AliasDef[] = [
     name: 'glpi_search',
     target: 'glpi_search_v2',
     mapArgs: (a) => {
-      const { itemtype, field, searchtype, value, ...rest } = a;
+      const { itemtype, field, searchtype, value, ...rest } = rangeArgs(a);
       return { ...rest, itemtype, criteria: [{ field, searchtype, value }] };
     },
   },

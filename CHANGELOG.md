@@ -19,7 +19,9 @@ ship here, under **Fixed**. Upgrade guide: README, "Upgrading from 3.x".
   into `glpi_find_user`; `glpi_search` into `glpi_search_v2`. The 50 removed
   names stay callable as hidden aliases that map their arguments (listed
   again with `GLPI_LEGACY_TOOLS=1`); the full table is in the README,
-  "Upgrading from 3.x". Aliases return the v4 output of their target.
+  "Upgrading from 3.x". Aliases return the v4 output of their target and
+  accept every argument their v3 tool listed (`range`, `include_deleted`
+  answered with an explanatory `isError`, `with_*`, `force`...).
 - **Output shapes.** Compact JSON. Lists return
   `{totalcount, start, count, next_start, items}`. Detail and list tools
   return a per-itemtype compact projection (`verbose: true` for every field,

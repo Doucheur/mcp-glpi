@@ -433,6 +433,9 @@ v4 lists 46 tools instead of 87. The 50 removed names still work: they are
 hidden aliases that translate their arguments and call the v4 tool, so they
 return v4 output. `GLPI_LEGACY_TOOLS=1` lists them again (without schemas).
 They disappear with their target when a toolset or read-only mode removes it.
+Each alias accepts every argument its v3 tool listed (a test calls each one
+with its full v3 argument set); `include_deleted` gets an `isError` result
+that explains its removal.
 
 | v3 tool | v4 call |
 |---|---|
@@ -456,7 +459,7 @@ They disappear with their target when a toolset or read-only mode removes it.
 | `glpi_list_documents`, `glpi_get_document` | `glpi_list_items` / `glpi_get_item {itemtype: "Document"}` |
 | `glpi_search_user {name}` | `glpi_find_user {query: name, exact: true}` |
 | `glpi_get_ticket_stats` | `glpi_tickets_stats_by {dimension: "status", ...}` |
-| `glpi_search {itemtype, field, searchtype, value}` | `glpi_search_v2 {itemtype, criteria: [{field, searchtype, value}]}` |
+| `glpi_search {itemtype, field, searchtype, value}` | `glpi_search_v2 {itemtype, criteria: [{field, searchtype, value}]}` (`range` -> `start`/`limit`; `limit`, `expand_dropdowns` kept) |
 
 The 37 other v3 names are unchanged v4 tools.
 

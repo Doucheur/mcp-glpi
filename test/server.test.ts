@@ -398,6 +398,85 @@ test('every alias is callable and reaches its target with mapped arguments', asy
   await close();
 });
 
+/** Every argument the v3.4 catalogue listed for each folded tool (git show main:src/index.ts). */
+const V3_LIST_ARGS = { start: 0, limit: 5, range: '0-4', sort: 'name', order: 'ASC', expand_dropdowns: true };
+const V3_WITH_ARGS = { with_softwares: true, with_networkports: true, with_connections: false, with_documents: true };
+const V3_ALIAS_ARGS: Record<string, Record<string, unknown>> = {
+  glpi_list_tickets: { ...V3_LIST_ARGS, sort: 'date_mod', status: 2 },
+  glpi_get_ticket_followups: { ticket_id: 5 },
+  glpi_get_ticket_tasks: { ticket_id: 5 },
+  glpi_get_ticket_solutions: { ticket_id: 5 },
+  glpi_get_ticket_validations: { ticket_id: 5 },
+  glpi_get_ticket_documents: { ticket_id: 5 },
+  glpi_get_change_tasks: { change_id: 7 },
+  glpi_get_problem_tasks: { problem_id: 8 },
+  glpi_create_computer: {
+    name: 'PC', serial: 'S', otherserial: 'O', contact: 'c', comment: 'x', locations_id: 1, states_id: 1,
+    computertypes_id: 1, manufacturers_id: 1,
+  },
+  glpi_update_computer: { id: 3, name: 'PC', serial: 'S', comment: 'x', locations_id: 1, states_id: 2 },
+  glpi_delete_computer: { id: 3, force: false },
+  glpi_create_software: { name: 'Vim', comment: 'x', manufacturers_id: 1, softwarecategories_id: 1 },
+  glpi_create_contract: { name: 'C', num: 'N', begin_date: '2026-01-01', duration: 12, notice: 1, comment: 'x' },
+  glpi_create_supplier: {
+    name: 'S', address: 'a', postcode: 'p', town: 't', country: 'c', website: 'w', phonenumber: '1', email: 'e@x',
+  },
+  glpi_create_location: { name: 'L', address: 'a', postcode: 'p', town: 't', building: 'b', room: 'r', locations_id: 1 },
+  glpi_create_project: {
+    name: 'P', code: 'C', content: 'x', priority: 3, plan_start_date: '2026-01-01', plan_end_date: '2026-02-01',
+    users_id: 1, groups_id: 1,
+  },
+  glpi_update_project: { id: 4, name: 'P', content: 'x', percent_done: 50, real_start_date: '2026-01-01', real_end_date: '2026-02-01' },
+  glpi_search_user: { name: 'jdoe' },
+  glpi_create_group: { name: 'G', comment: 'x', is_requester: true, is_assign: false },
+  glpi_get_ticket_stats: { entity_id: 0, date_from: '2026-01-01', date_to: '2026-01-31' },
+  glpi_search: { itemtype: 'Computer', field: 1, searchtype: 'contains', value: 'PC', range: '0-9', limit: 10, expand_dropdowns: false },
+};
+for (const [name] of LIST_ALIASES) V3_ALIAS_ARGS[name] = V3_LIST_ARGS;
+for (const [name] of GET_ALIASES) {
+  V3_ALIAS_ARGS[name] = ['glpi_get_knowbase_item', 'glpi_get_contract', 'glpi_get_supplier', 'glpi_get_location',
+    'glpi_get_project', 'glpi_get_group', 'glpi_get_entity', 'glpi_get_document'].includes(name)
+    ? { id: 3 }
+    : { id: 3, ...V3_WITH_ARGS };
+}
+V3_ALIAS_ARGS.glpi_get_computer = { id: 3, ...V3_WITH_ARGS };
+
+/** A permissive fake GLPI: every call succeeds with an empty or minimal answer. */
+function permissiveGlpi(c: FetchCall): Response {
+  if (c.path === 'getFullSession') return json({ session: { glpiID: 7 } });
+  if (c.path === 'listSearchOptions/Ticket') {
+    return json({ ...TICKET_OPTIONS, 19: { name: 'Last update', field: 'date_mod', uid: 'Ticket.date_mod' } });
+  }
+  if (c.path.startsWith('listSearchOptions/')) {
+    const itemtype = c.path.split('/')[1];
+    return json({ 1: { name: 'Name', field: 'name', uid: `${itemtype}.name` } });
+  }
+  if (c.path.startsWith('search/')) return json({ totalcount: 0, count: 0, data: [] });
+  if (c.method === 'POST') return json({ id: 1 }, { status: 201 });
+  if (c.method === 'PUT') return json([{ 1: true }]);
+  if (c.method === 'DELETE') return json([{ 3: true }]);
+  if (/\/\d+$/.test(c.path)) return json({ id: Number(c.path.split('/').pop()), name: 'x' });
+  return json([], { headers: { 'Content-Range': '0-0/0' } });
+}
+
+test('every alias accepts its full v3 argument set (real handlers, fake GLPI)', async () => {
+  assert.deepEqual(Object.keys(V3_ALIAS_ARGS).sort(), ALL_ALIASES.map((a) => a.name).sort(), 'every alias has v3 arguments');
+  installFetch(permissiveGlpi);
+  const { client, close } = await connect();
+  for (const [alias, args] of Object.entries(V3_ALIAS_ARGS)) {
+    // A protocol error rejects; the result must also be a success.
+    const res = await client.callTool({ name: alias, arguments: args });
+    assert.ok(!res.isError, `${alias}: ${resultText(res)}`);
+  }
+  // include_deleted (v3 list argument) is refused with an explanation, not a protocol error.
+  for (const alias of ['glpi_list_tickets', 'glpi_list_computers']) {
+    const res = await client.callTool({ name: alias, arguments: { include_deleted: true } });
+    assert.equal(res.isError, true, alias);
+    assert.match(resultText(res), new RegExp(`^Invalid arguments for ${alias}: include_deleted was removed`));
+  }
+  await close();
+});
+
 // ---------------------------------------------------------------------------
 // Errors
 // ---------------------------------------------------------------------------
