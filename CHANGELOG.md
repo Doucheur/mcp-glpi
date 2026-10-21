@@ -1,5 +1,67 @@
 # Changelog
 
+## 4.0.0 (unreleased)
+
+Stub with the facts for the release notes (rewritten in step 4).
+
+### Breaking changes
+- 46 listed tools instead of 87. The 50 removed names stay callable as hidden
+  aliases (listed again with `GLPI_LEGACY_TOOLS=1`).
+- Outputs are compact JSON. Lists return
+  `{ totalcount, start, count, next_start, items }` (default limit 25, max 500;
+  `range` still accepted). Detail tools return a compact projection
+  (`verbose: true` for every field). HATEOAS `links` are gone
+  (`get_hateoas=false`). Text fields (`content`, `answer`, `comment`...) are
+  plain text capped at `max_content_chars` (default 2000; `raw_html: true`
+  keeps the stored HTML). ITIL objects carry `status_label`,
+  `urgency_label`, `priority_label`.
+- Search rows: well-known Ticket options get friendly keys (`requester_name`,
+  `technician_name`, `technician_group`, `requester_group`, `observer_name`,
+  `observer_group`, `category`, `entity`, `status`, `priority`, `urgency`,
+  `date`, `date_mod`, `solvedate`, `closedate`, `time_to_resolve`, `content`);
+  Change/Problem get `category`, `entity`, `status`, `date`, `date_mod`.
+- Arguments are validated strictly (unknown keys rejected, JSON-RPC
+  InvalidParams). GLPI/runtime failures are `isError` results with a hint.
+- `purge`/`force` on glpi_delete_ticket and glpi_delete_item needs
+  `confirm_id` equal to `id` (the legacy glpi_delete_computer alias keeps
+  the v3 behaviour). glpi_create_user has no `password` parameter.
+- Open tickets (`open_only`, glpi_list_overdue_tickets, glpi://tickets/open)
+  use status `notold`: `lessthan 5` matched Solved tickets.
+
+### New
+- glpi_list_items / glpi_get_item / glpi_create_item / glpi_update_item /
+  glpi_delete_item over 24 itemtypes; glpi_set_ticket_status;
+  glpi_find_user; glpi_set_active_entity; glpi_set_active_profile;
+  `me` in glpi_get_session_info; `kinds` on glpi_get_ticket_timeline (adds
+  attached documents); `itemtype` (Change/Problem) on glpi_add_followup /
+  glpi_add_task / glpi_add_solution; `query` on glpi_list_search_options.
+- `GLPI_TOOLSETS` (tickets, itil, assets, users, kb, search, stats, session,
+  admin), `GLPI_READ_ONLY=1`, `GLPI_LEGACY_TOOLS=1`; HTTP mode warns when
+  `GLPI_READ_ONLY` is unset. Server `instructions`.
+
+### Alias table (v3 name -> v4 call)
+| v3 tool | v4 tool and mapped arguments |
+|---|---|
+| glpi_list_tickets | glpi_search_tickets (range -> start/limit) |
+| glpi_get_ticket_followups / _tasks / _solutions / _validations / _documents {ticket_id} | glpi_get_ticket_timeline {id, kinds:[followup / task / solution / validation / document]} |
+| glpi_get_change_tasks {change_id} | glpi_get_ticket_timeline {itemtype:Change, id, kinds:[task]} |
+| glpi_get_problem_tasks {problem_id} | glpi_get_ticket_timeline {itemtype:Problem, id, kinds:[task]} |
+| glpi_list_{computers, softwares, network_equipments, printers, monitors, phones} | glpi_list_items {itemtype: Computer, Software, NetworkEquipment, Printer, Monitor, Phone} |
+| glpi_get_{computer, software, network_equipment, printer, monitor, phone} {with_*} | glpi_get_item {itemtype, id, with:[...]} |
+| glpi_create_computer, glpi_create_software | glpi_create_item {itemtype, input} |
+| glpi_update_computer | glpi_update_item {itemtype:Computer, id, input} |
+| glpi_delete_computer {force} | glpi_delete_item {itemtype:Computer, purge, confirm_id} |
+| glpi_list_knowbase, glpi_get_knowbase_item | glpi_list_items / glpi_get_item {itemtype:KnowbaseItem} |
+| glpi_list/get/create_contract(s), _supplier(s), _location(s) | glpi_list_items / glpi_get_item / glpi_create_item {itemtype: Contract, Supplier, Location} |
+| glpi_list/get/create/update_project(s) | glpi_*_item {itemtype:Project} |
+| glpi_list_groups, glpi_get_group, glpi_create_group | glpi_list_items / glpi_get_item / glpi_create_item {itemtype:Group} |
+| glpi_list_categories | glpi_list_items {itemtype:ITILCategory} |
+| glpi_list_entities, glpi_get_entity | glpi_list_items / glpi_get_item {itemtype:Entity} |
+| glpi_list_documents, glpi_get_document | glpi_list_items / glpi_get_item {itemtype:Document} |
+| glpi_search_user {name} | glpi_find_user {query:name, exact:true} |
+| glpi_get_ticket_stats | glpi_tickets_stats_by {dimension:status} |
+| glpi_search {itemtype, field, searchtype, value} | glpi_search_v2 {itemtype, criteria:[{field, searchtype, value}]} |
+
 ## 3.5.0 — 2026-10-21
 
 Corrective release (to be folded into 4.0.0).
