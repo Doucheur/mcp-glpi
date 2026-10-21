@@ -25,12 +25,30 @@ import {
   ErrorCode,
   McpError,
 } from '@modelcontextprotocol/sdk/types.js';
+import type {
+  CallToolRequest,
+  CallToolResult,
+  ListResourcesResult,
+  ListToolsResult,
+  ReadResourceRequest,
+  ReadResourceResult,
+} from '@modelcontextprotocol/sdk/types.js';
 import { readFile } from 'node:fs/promises';
 import { basename, extname } from 'node:path';
 import { z } from 'zod';
 import { GlpiClient, GlpiConfig, ListOptions } from './glpi-client.js';
 import { GlpiError } from './http.js';
+import {
+  ConfigError,
+  HttpTransportConfig,
+  USAGE,
+  parseTransportConfig,
+  startHttpMcpServer,
+} from './http-server.js';
 import { SearchCriterion, SearchType, SearchLink } from './search.js';
+
+/** Keep in sync with package.json (see CLAUDE.md). */
+const SERVER_VERSION = '3.4.0';
 
 // ---------------------------------------------------------------------------
 // Validation Schemas
@@ -243,12 +261,33 @@ function formatTicketSummary(t: any) {
 // Server setup
 // ---------------------------------------------------------------------------
 
-const server = new Server(
-  { name: 'mcp-glpi', version: '3.0.0' },
-  { capabilities: { tools: {}, resources: {} } }
-);
-
+/**
+ * The GLPI client is process-wide: one GLPI session shared by every MCP
+ * connection (one stdio client, or every request to the HTTP endpoint).
+ */
 let client: GlpiClient;
+
+/**
+ * Build an MCP server with every handler registered.
+ *
+ * A `Server` can be attached to exactly one transport — `Protocol.connect()`
+ * throws on the second — so stdio gets one instance and each HTTP POST gets its
+ * own. Building an instance is cheap: the handlers below are module-level
+ * functions and the tool catalogue is a constant.
+ */
+function createMcpServer(): Server {
+  const server = new Server(
+    { name: 'mcp-glpi', version: SERVER_VERSION },
+    { capabilities: { tools: {}, resources: {} } }
+  );
+
+  server.setRequestHandler(ListToolsRequestSchema, handleListTools);
+  server.setRequestHandler(CallToolRequestSchema, handleCallTool);
+  server.setRequestHandler(ListResourcesRequestSchema, handleListResources);
+  server.setRequestHandler(ReadResourceRequestSchema, handleReadResource);
+
+  return server;
+}
 
 // ---------------------------------------------------------------------------
 // Tool registration
@@ -313,8 +352,13 @@ function annotate<T extends { name: string }>(tool: T): T & { annotations: ToolA
   return { ...tool, annotations: toolAnnotations(tool.name) };
 }
 
-server.setRequestHandler(ListToolsRequestSchema, async () => ({
-  tools: [
+/** One entry of the tool catalogue, as `tools/list` reports it. */
+type ToolDefinition = ListToolsResult['tools'][number];
+
+const handleListTools = async (): Promise<ListToolsResult> => {
+  // Annotating the array keeps `type: 'object'` literal instead of widening to
+  // `string`, which the tools/list result type requires.
+  const tools: ToolDefinition[] = [
     // ============== READ — TICKETS ==============
     {
       name: 'glpi_list_tickets',
@@ -676,7 +720,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
     // ============== ASSETS ==============
     ...[
       'computers', 'softwares', 'network_equipments', 'printers', 'monitors', 'phones',
-    ].flatMap((asset) => {
+    ].flatMap((asset): ToolDefinition[] => {
       const singular = asset.replace(/s$/, '');
       return [
         {
@@ -1101,14 +1145,16 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
         required: ['itemtype', 'field', 'searchtype', 'value'],
       },
     },
-  ].map(annotate),
-}));
+  ];
+
+  return { tools: tools.map(annotate) };
+};
 
 // ---------------------------------------------------------------------------
 // Tool dispatch
 // ---------------------------------------------------------------------------
 
-server.setRequestHandler(CallToolRequestSchema, async (request) => {
+const handleCallTool = async (request: CallToolRequest): Promise<CallToolResult> => {
   const { name, arguments: argsRaw } = request.params;
   const args = (argsRaw ?? {}) as Record<string, unknown>;
 
@@ -1842,13 +1888,13 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       `Error executing ${name}: ${error instanceof Error ? error.message : String(error)}`
     );
   }
-});
+};
 
 // ---------------------------------------------------------------------------
 // Resources
 // ---------------------------------------------------------------------------
 
-server.setRequestHandler(ListResourcesRequestSchema, async () => ({
+const handleListResources = async (): Promise<ListResourcesResult> => ({
   resources: [
     { uri: 'glpi://tickets/open', name: 'Open Tickets', description: 'Tickets with status < 5', mimeType: 'application/json' },
     { uri: 'glpi://tickets/recent', name: 'Recent Tickets', description: 'Most recent tickets', mimeType: 'application/json' },
@@ -1860,9 +1906,9 @@ server.setRequestHandler(ListResourcesRequestSchema, async () => ({
     { uri: 'glpi://stats/tickets', name: 'Ticket Statistics', description: 'Ticket counts', mimeType: 'application/json' },
     { uri: 'glpi://stats/assets', name: 'Asset Statistics', description: 'Asset counts', mimeType: 'application/json' },
   ],
-}));
+});
 
-server.setRequestHandler(ReadResourceRequestSchema, async (request) => {
+const handleReadResource = async (request: ReadResourceRequest): Promise<ReadResourceResult> => {
   const { uri } = request.params;
   try {
     switch (uri) {
@@ -1910,14 +1956,81 @@ server.setRequestHandler(ReadResourceRequestSchema, async (request) => {
       `Error reading resource: ${error instanceof Error ? error.message : String(error)}`
     );
   }
-});
+};
 
 // ---------------------------------------------------------------------------
 // Main
 // ---------------------------------------------------------------------------
 
+/** Set in HTTP mode so shutdown can stop accepting requests. */
+let runningHttpServer: { close: () => Promise<void> } | undefined;
+let shuttingDown = false;
+
+async function shutdown(reason: string) {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  console.error(`Shutting down (${reason})...`);
+  try {
+    await runningHttpServer?.close();
+  } catch (error) {
+    console.error('Warning: HTTP server close failed:', error instanceof Error ? error.message : error);
+  }
+  try {
+    await client.killSession();
+  } catch (error) {
+    console.error('Warning: killSession failed during shutdown:', error instanceof Error ? error.message : error);
+  }
+  process.exit(0);
+}
+
+/** MCP over stdin/stdout — one client, the default (Claude Desktop/Code, Cursor). */
+async function startStdioTransport() {
+  const server = createMcpServer();
+  await server.connect(new StdioServerTransport());
+  console.error(`MCP GLPI Server v${SERVER_VERSION} running on stdio`);
+}
+
+/** MCP Streamable HTTP — web clients such as Open WebUI. */
+async function startHttpTransport(config: HttpTransportConfig) {
+  const running = await startHttpMcpServer({
+    config,
+    createServer: createMcpServer,
+    log: (message) => console.error(`[mcp-http] ${message}`),
+  });
+  runningHttpServer = running;
+
+  console.error(`MCP GLPI Server v${SERVER_VERSION} listening on ${running.url}`);
+  console.error('  transport: streamable HTTP (stateless, JSON responses)');
+  console.error(
+    `  auth: ${config.authToken ? 'bearer token required' : 'none — bind to loopback or set MCP_HTTP_AUTH_TOKEN before exposing this port'}`
+  );
+  if (!config.allowedHosts) {
+    console.error(
+      `  warning: Host header validation is off because the server is bound to ${config.host}; ` +
+      'set MCP_HTTP_ALLOWED_HOSTS to restrict it'
+    );
+  }
+}
+
 async function main() {
   try {
+    const argv = process.argv.slice(2);
+    if (argv.includes('--help') || argv.includes('-h')) {
+      console.error(USAGE);
+      process.exit(0);
+    }
+
+    let transportConfig;
+    try {
+      transportConfig = parseTransportConfig(argv, process.env);
+    } catch (error) {
+      if (error instanceof ConfigError) {
+        console.error(`Configuration error: ${error.message}\n\n${USAGE}`);
+        process.exit(2);
+      }
+      throw error;
+    }
+
     const config = getConfig();
     client = new GlpiClient(config);
 
@@ -1933,20 +2046,14 @@ async function main() {
       );
     }
 
-    const transport = new StdioServerTransport();
-    await server.connect(transport);
-    console.error('MCP GLPI Server v3.0 running on stdio');
+    if (transportConfig.mode === 'http') {
+      await startHttpTransport(transportConfig.http);
+    } else {
+      await startStdioTransport();
+    }
 
-    const shutdown = async () => {
-      try {
-        await client.killSession();
-      } catch (error) {
-        console.error('Warning: killSession failed during shutdown:', error instanceof Error ? error.message : error);
-      }
-      process.exit(0);
-    };
-    process.on('SIGINT', shutdown);
-    process.on('SIGTERM', shutdown);
+    process.on('SIGINT', () => void shutdown('SIGINT'));
+    process.on('SIGTERM', () => void shutdown('SIGTERM'));
   } catch (error) {
     console.error('Failed to start server:', error);
     process.exit(1);
