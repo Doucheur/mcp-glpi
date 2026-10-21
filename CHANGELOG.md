@@ -214,8 +214,8 @@ Other:
 
 ### Performance
 
-- `tools/list` shrinks from 41.9k characters for 87 tools (v3) to 25.9k for
-  46 tools, 12.6k with `GLPI_READ_ONLY=1` (21 tools). Code tables, the date
+- `tools/list` shrinks from 41.9k characters for 87 tools (v3) to 25.3k for
+  46 tools, 12.8k with `GLPI_READ_ONLY=1` (23 tools). Code tables, the date
   format and the paging and text rules moved to the instructions (2.5k,
   sent once); descriptions are at most 160 characters; listed schemas drop
   `$schema`, `additionalProperties: false`, redundant minimums, defaults and

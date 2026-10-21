@@ -556,8 +556,8 @@ npm start            # node dist/index.js (stdio); npm start -- --http for HTTP
 ```
 
 `npm run measure` builds the catalogue in-process and prints its size, the
-largest tools and where the characters go. Today: 46 tools, 25,925
-characters (about 7.2k tokens); 21 tools and 12,647 characters with
+largest tools and where the characters go. Today: 46 tools, 25,287
+characters (about 7.0k tokens); 23 tools and 12,844 characters with
 `GLPI_READ_ONLY=1`; instructions 2,458 characters. `test/server.test.ts` pins
 the ceilings.
 
