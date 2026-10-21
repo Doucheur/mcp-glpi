@@ -885,13 +885,20 @@ export class GlpiClient {
   async getUserByName(name: string): Promise<GlpiUser | null> {
     const login = name.trim();
     if (!login) return null;
-    const users = await this.getItems<GlpiUser>('User', {
-      range: '0-49',
-      searchText: { name: `^${login}$` },
-    });
-    // LIKE treats "_" and "%" as wildcards and is case-insensitive: re-check.
-    let matches = users.filter((u) => u.name === login);
-    if (matches.length === 0) matches = users.filter((u) => String(u.name).toLowerCase() === login.toLowerCase());
+    const exact = (users: GlpiUser[]) => {
+      // LIKE treats "_" and "%" as wildcards and is case-insensitive: re-check.
+      const norm = (u: GlpiUser) => String(u.name ?? '').trim();
+      const same = users.filter((u) => norm(u) === login);
+      return same.length > 0 ? same : users.filter((u) => norm(u).toLowerCase() === login.toLowerCase());
+    };
+    let matches = exact(
+      await this.getItems<GlpiUser>('User', { range: '0-49', searchText: { name: `^${login}$` } })
+    );
+    if (matches.length === 0) {
+      // GLPI's "$" anchor misses logins stored with trailing spaces: retry
+      // with a plain "contains" and compare the trimmed names.
+      matches = exact(await this.getItems<GlpiUser>('User', { range: '0-199', searchText: { name: login } }));
+    }
     if (matches.length === 0) return null;
     if (matches.length > 1) {
       throw new Error(

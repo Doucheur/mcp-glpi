@@ -55,6 +55,16 @@ test('getUserByName matches exactly', async () => {
   assert.equal(new URL(calls[0].url).searchParams.get('searchText[name]'), '^jdoe$');
 });
 
+test('getUserByName falls back to a contains search for logins stored with trailing spaces', async () => {
+  const calls = installFetch(async (url) => {
+    const q = new URL(url).searchParams.get('searchText[name]');
+    return json(q === '^jdoe$' ? [] : [{ id: 8, name: 'jdoe ' }, { id: 9, name: 'jdoe2' }]);
+  });
+  const user = await client().getUserByName('jdoe');
+  assert.equal(user?.id, 8);
+  assert.equal(new URL(calls[1].url).searchParams.get('searchText[name]'), 'jdoe');
+});
+
 test('getUserByName returns null when nobody matches and throws when ambiguous', async () => {
   installFetch(async () => json([{ id: 1, name: 'other' }]));
   assert.equal(await client().getUserByName('jdoe'), null);
