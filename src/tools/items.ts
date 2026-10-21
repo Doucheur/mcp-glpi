@@ -8,7 +8,8 @@ import { ArgumentError } from '../errors.js';
 import type { GetOptions } from '../glpi-client.js';
 import { compactItem, listEnvelope, text } from '../output.js';
 import { advertisedAs, defineTool, type ToolDef } from './registry.js';
-import { checkPurge } from './tickets.js';
+import { ITIL_UPDATE_FIELDS } from './itil.js';
+import { TICKET_UPDATE_FIELDS, checkPurge } from './tickets.js';
 import { fields, id, listShape, optBool, optInt, textShape, toListOptions, verbose } from './common.js';
 
 const invalid = (message: string) => new ArgumentError(message);
@@ -45,9 +46,10 @@ export const UPDATE_FIELDS: Partial<Record<Itemtype, readonly string[]>> = {
     'users_id', 'groups_id', 'users_id_tech', 'groups_id_tech',
   ],
   Project: ['name', 'content', 'percent_done', 'real_start_date', 'real_end_date'],
-  Ticket: ['name', 'content', 'status', 'urgency', 'priority', 'impact', 'itilcategories_id'],
-  Problem: ['name', 'content', 'status', 'urgency', 'priority', 'impact', 'itilcategories_id'],
-  Change: ['name', 'content', 'status', 'urgency', 'priority', 'impact', 'itilcategories_id'],
+  // Same fields as glpi_update_ticket / glpi_update_problem / glpi_update_change.
+  Ticket: TICKET_UPDATE_FIELDS,
+  Problem: ITIL_UPDATE_FIELDS,
+  Change: ITIL_UPDATE_FIELDS,
 };
 
 const PASSWORD_FIELDS = ['password', 'password2'];

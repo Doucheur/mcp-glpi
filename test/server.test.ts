@@ -17,6 +17,7 @@ import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import { GlpiClient } from '../src/glpi-client.js';
 import { ALL_ALIASES, ALL_TOOLS, INSTRUCTIONS, SERVER_VERSION, createMcpServer } from '../src/server.js';
 import { SHARED_PARAMS } from '../src/tools/common.js';
+import { UPDATE_FIELDS } from '../src/tools/items.js';
 import { annotationsOf, parseRegistryOptions, slimJsonSchema, type RegistryOptions, type ToolDef } from '../src/tools/registry.js';
 import { text } from '../src/output.js';
 
@@ -669,6 +670,29 @@ test('glpi_update_item enforces the Computer whitelist; delete_ticket purge need
   const res = await client.callTool({ name: 'glpi_delete_ticket', arguments: { id: 5, purge: true, confirm_id: 5 } });
   assert.deepEqual(resultJson(res), { success: true, id: 5, purged: true });
   assert.equal(calls.at(-1)?.query.get('force_purge'), '1');
+  await close();
+});
+
+test('glpi_update_item on Ticket / Problem / Change allows the fields of their own update tools', async () => {
+  const byName = new Map(ALL_TOOLS.map((d) => [d.name, d]));
+  const fieldsOf = (name: string) => Object.keys(byName.get(name)!.inputSchema).filter((k) => k !== 'id').sort();
+  assert.deepEqual([...UPDATE_FIELDS.Ticket!].sort(), fieldsOf('glpi_update_ticket'));
+  assert.deepEqual([...UPDATE_FIELDS.Problem!].sort(), fieldsOf('glpi_update_problem'));
+  assert.deepEqual([...UPDATE_FIELDS.Change!].sort(), fieldsOf('glpi_update_change'));
+
+  const calls = installFetch((c) => (c.method === 'PUT' ? json([{ 5: true }]) : undefined));
+  const { client, close } = await connect();
+  const ok = await client.callTool({
+    name: 'glpi_update_item',
+    arguments: { itemtype: 'Ticket', id: 5, input: { type: 2, time_to_resolve: '2026-11-01 12:00:00' } },
+  });
+  assert.ok(!ok.isError, resultText(ok));
+  assert.deepEqual(calls.at(-1)?.body, { input: { type: 2, time_to_resolve: '2026-11-01 12:00:00' } });
+  assert.equal(calls.at(-1)?.path, 'Ticket/5');
+  // type and time_to_resolve are Ticket fields: glpi_update_change does not take them either.
+  const refused = await client.callTool({ name: 'glpi_update_item', arguments: { itemtype: 'Change', id: 5, input: { type: 2 } } });
+  assert.equal(refused.isError, true);
+  assert.match(resultText(refused), /Change: field\(s\) type cannot be updated here/);
   await close();
 });
 

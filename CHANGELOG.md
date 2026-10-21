@@ -63,6 +63,10 @@ ship here, under **Fixed**. Upgrade guide: README, "Upgrading from 3.x".
   problems, changes, logs), `glpi_create_item`, `glpi_update_item`,
   `glpi_delete_item` over 24 itemtypes, including `Peripheral`, `Rack`,
   `Enclosure`, `PDU` and `Profile`, which had no list or get tool in v3.
+  `glpi_update_item` restricts `Computer` and `Project` to their usual
+  fields, and `Ticket` / `Problem` / `Change` to the fields of
+  `glpi_update_ticket` / `glpi_update_problem` / `glpi_update_change` (same
+  lists in the code).
 - `glpi_get_ticket_timeline`: `kinds` (`followup`, `task`, `solution`,
   `validation`, `document`; attached documents are new), `verbose`,
   `max_content_chars`, `raw_html`.

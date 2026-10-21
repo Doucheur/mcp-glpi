@@ -31,6 +31,23 @@ export const ITIL_LIST_FIELDS = [
   'itilcategories_id', 'entities_id', 'date', 'date_mod', 'solvedate', 'closedate',
 ];
 
+/** Arguments of glpi_update_problem / glpi_update_change. */
+function itilUpdateShape(statusDesc: string) {
+  return {
+    id: id(),
+    name: optStr('Title'),
+    content: optStr(),
+    status: optInt(statusDesc),
+    urgency: optInt(URGENCY_DESC),
+    impact: optInt(IMPACT_DESC),
+    priority: optInt(PRIORITY_DESC),
+    itilcategories_id: optId(),
+  };
+}
+
+/** Fields glpi_update_problem / glpi_update_change change; glpi_update_item allows the same. */
+export const ITIL_UPDATE_FIELDS: readonly string[] = Object.keys(itilUpdateShape('')).filter((k) => k !== 'id');
+
 function itilTools(itemtype: 'Problem' | 'Change'): ToolDef[] {
   const lower = itemtype.toLowerCase();
   const plural = `${lower}s`;
@@ -110,16 +127,7 @@ function itilTools(itemtype: 'Problem' | 'Change'): ToolDef[] {
     title: `Update ${lower}`,
     toolset: 'itil',
     description: `Change the given fields of a ${lower}.`,
-    inputSchema: {
-      id: id(),
-      name: optStr('Title'),
-      content: optStr(),
-      status: optInt(statusDesc),
-      urgency: optInt(URGENCY_DESC),
-      impact: optInt(IMPACT_DESC),
-      priority: optInt(PRIORITY_DESC),
-      itilcategories_id: optId(),
-    },
+    inputSchema: itilUpdateShape(statusDesc),
     handler: async ({ client }, a) => {
       const { id: itemId, ...fields } = a;
       const updates = defined(fields);

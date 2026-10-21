@@ -357,24 +357,29 @@ const createTicket = defineTool({
   },
 });
 
+const updateTicketShape = {
+  id: id(),
+  name: optStr('Title'),
+  content: optStr(),
+  status: optInt(STATUS_TICKET_DESC),
+  urgency: optInt(URGENCY_DESC),
+  impact: optInt(IMPACT_DESC),
+  priority: optInt(PRIORITY_DESC),
+  itilcategories_id: optId(),
+  type: optInt('Ticket type'),
+  time_to_resolve: optStr(`Resolution deadline ${DATE}`),
+};
+
+/** Fields glpi_update_ticket changes; glpi_update_item allows the same on Ticket. */
+export const TICKET_UPDATE_FIELDS: readonly string[] = Object.keys(updateTicketShape).filter((k) => k !== 'id');
+
 const updateTicket = defineTool({
   name: 'glpi_update_ticket',
   title: 'Update ticket',
   toolset: 'tickets',
   description:
     'Change the given fields of a ticket. To solve with an explanation prefer glpi_add_solution.',
-  inputSchema: {
-    id: id(),
-    name: optStr('Title'),
-    content: optStr(),
-    status: optInt(STATUS_TICKET_DESC),
-    urgency: optInt(URGENCY_DESC),
-    impact: optInt(IMPACT_DESC),
-    priority: optInt(PRIORITY_DESC),
-    itilcategories_id: optId(),
-    type: optInt('Ticket type'),
-    time_to_resolve: optStr(`Resolution deadline ${DATE}`),
-  },
+  inputSchema: updateTicketShape,
   handler: async ({ client }, a) => {
     const { id: ticketId, ...fields } = a;
     const updates = defined(fields);

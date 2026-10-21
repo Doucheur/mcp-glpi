@@ -215,7 +215,7 @@ These work on 24 itemtypes: `Computer`, `Software`, `NetworkEquipment`,
 | `glpi_list_items` | core | `itemtype`, paging, `sort`, `order`, `search_text`, `is_deleted`, `expand_dropdowns`, `fields`, `verbose` | Compact rows of one itemtype; `search_text` = `{column: "substring"}`, `"^x$"` for exact |
 | `glpi_get_item` | core | `itemtype`, `id`, `with`, `verbose` | One item; `with` embeds `softwares`, `networkports`, `connections`, `disks`, `documents`, `infocoms`, `contracts`, `tickets`, `problems`, `changes`, `logs` |
 | `glpi_create_item` | W | `itemtype`, `input` | Create from GLPI column values, e.g. `{"name":"PC-42","locations_id":3}` |
-| `glpi_update_item` | W | `itemtype`, `id`, `input` | Change the given columns; `Computer`, `Project`, `Ticket`, `Problem`, `Change` accept only their usual fields |
+| `glpi_update_item` | W | `itemtype`, `id`, `input` | Change the given columns; `Computer` and `Project` accept only their usual fields, `Ticket` / `Problem` / `Change` exactly those of `glpi_update_ticket` / `glpi_update_problem` / `glpi_update_change` |
 | `glpi_delete_item` | W | `itemtype`, `id`, `purge`, `confirm_id` | Trash, or purge with `confirm_id` = `id` |
 
 `input` never accepts `password` / `password2` for `User`.
