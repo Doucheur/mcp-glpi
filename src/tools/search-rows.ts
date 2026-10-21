@@ -2,7 +2,7 @@
  * Search results (`search/{itemtype}`) as list envelopes with readable rows.
  */
 
-import { ErrorCode, McpError } from '@modelcontextprotocol/sdk/types.js';
+import { ArgumentError } from '../errors.js';
 import type { GlpiClient } from '../glpi-client.js';
 import type { SearchResponse } from '../search.js';
 import { cleanTextFields, listEnvelope, type ListEnvelope, type TextOptions, withItilLabels } from '../output.js';
@@ -27,10 +27,7 @@ export async function resolveSearchSort(
   if (typeof sort === 'number') return sort;
   const resolved = await client.searchOptions.resolveField(itemtype, sort);
   if (resolved === undefined) {
-    throw new McpError(
-      ErrorCode.InvalidParams,
-      `sort: "${sort}" is not a search option of ${itemtype} (see glpi_list_search_options)`
-    );
+    throw new ArgumentError(`sort: "${sort}" is not a search option of ${itemtype} (see glpi_list_search_options)`);
   }
   return resolved;
 }

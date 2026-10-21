@@ -4,9 +4,9 @@
  */
 
 import { z } from 'zod';
-import { ErrorCode, McpError } from '@modelcontextprotocol/sdk/types.js';
 import type { GlpiClient } from '../glpi-client.js';
 import type { SearchCriterion } from '../search.js';
+import { ArgumentError } from '../errors.js';
 import { type ItilItemtype, VALIDATION_STATUS } from '../itil.js';
 import { cleanTextFields, compactItem, pageLimit, stripLinks, text } from '../output.js';
 import {
@@ -42,7 +42,7 @@ import {
 } from './common.js';
 import { resolveSearchSort, searchEnvelope } from './search-rows.js';
 
-const invalid = (message: string) => new McpError(ErrorCode.InvalidParams, message);
+const invalid = (message: string) => new ArgumentError(message);
 
 /** Id of the Ticket, Change or Problem named by `itemtype` (ids are per itemtype). */
 const ITIL_PARENT_DESC = 'Id within itemtype';
@@ -130,7 +130,7 @@ async function actorValue(client: GlpiClient, value: number | 'me'): Promise<num
   try {
     return await resolveMyUserId(client);
   } catch (err) {
-    throw new Error(`Cannot resolve "me" to a user id (${err instanceof Error ? err.message : err}); pass the numeric id`);
+    throw new ArgumentError(`Cannot resolve "me" to a user id (${err instanceof Error ? err.message : err}); pass the numeric id`);
   }
 }
 

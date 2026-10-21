@@ -28,7 +28,7 @@ export {
 } from './server.js';
 export type { CreateMcpServerOptions, ServerOptions } from './server.js';
 
-export { describeError, toolError } from './errors.js';
+export { ArgumentError, describeError, toolError } from './errors.js';
 
 export {
   ITIL_ITEMTYPES,

@@ -298,15 +298,22 @@ Solved.
 
 ## Errors
 
-Three kinds of failure, so a model can tell what to fix:
+Two kinds of failure, so a model can tell what to fix:
 
-- **Invalid arguments** (unknown key, wrong type, missing id, `purge` without
-  `confirm_id`, upload outside `GLPI_UPLOAD_DIR`...): JSON-RPC error
-  `InvalidParams`, e.g. `Invalid arguments for glpi_get_ticket: id: Expected number, received string`.
-- **Unknown or disabled tool**: `MethodNotFound`, or `InvalidRequest` with the
-  reason (`Tool glpi_create_ticket is disabled: the server runs read-only (GLPI_READ_ONLY=1)`).
-- **GLPI or network failure**: a normal result with `isError: true` and a
-  text the model can act on:
+- **Protocol errors** (JSON-RPC), only when the call does not match the
+  listed tool: arguments that fail the advertised schema (unknown key, wrong
+  type, missing required argument) give `InvalidParams`, e.g.
+  `Invalid arguments for glpi_get_ticket: id: Expected number, received string`;
+  an unknown tool gives `MethodNotFound`; a disabled one `InvalidRequest`
+  with the reason (`Tool glpi_create_ticket is disabled: the server runs read-only (GLPI_READ_ONLY=1)`).
+- **`isError` results** for everything else, with a text the model can act
+  on. Argument problems found while running the tool start with
+  `Invalid arguments for <tool>:` and say how to fix them: `purge` without
+  `confirm_id`, `file_path` outside `GLPI_UPLOAD_DIR`, `"me"` that cannot be
+  resolved, a bad link relation, a search field or sort that is not a search
+  option of the itemtype, a field `glpi_update_item` does not allow, the
+  removed `include_deleted`, nothing to update. GLPI and network failures
+  give the GLPI call and a hint:
 
 ```
 GLPI POST ITILFollowup -> 403 ERROR_RIGHT_MISSING: You don't have permission to perform this action.
@@ -464,8 +471,8 @@ The 37 other v3 names are unchanged v4 tools.
   array.
 - **Default limit 25** rows per page (max 500) on every list and search tool.
 - **Strict arguments.** Unknown keys are a protocol error instead of being
-  ignored. `include_deleted` is gone: `is_deleted: true` lists only trashed
-  rows. Ids must be positive integers (numeric strings are accepted).
+  ignored. `include_deleted` is gone (an `isError` result says why):
+  `is_deleted: true` lists only trashed rows. Ids must be positive integers (numeric strings are accepted).
 - **Status filters run in GLPI.** `glpi_list_tickets {status}` used to filter
   one page client-side and miss most matches; it now searches server-side.
 - **Open tickets use `notold`.** `open_only`, `glpi_list_overdue_tickets`

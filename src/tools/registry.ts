@@ -5,9 +5,11 @@
  * Tools are registered on the McpServer (`registerTool`), then the two tool
  * request handlers are replaced so that:
  *   - aliases are callable but not listed (unless GLPI_LEGACY_TOOLS=1);
- *   - argument validation failures and unknown tools stay protocol errors
- *     (JSON-RPC InvalidParams / MethodNotFound), while GLPI and runtime
- *     failures become `isError` results with a hint (errors.ts);
+ *   - schema validation failures of the listed arguments and unknown or
+ *     disabled tools stay protocol errors (JSON-RPC InvalidParams /
+ *     MethodNotFound / InvalidRequest); argument problems found by a handler
+ *     (ArgumentError), GLPI and runtime failures become `isError` results
+ *     with an explanation or a hint (errors.ts);
  *   - listed JSON schemas are converted once and carry no `$schema` noise.
  */
 
@@ -22,7 +24,7 @@ import type { CallToolResult, ListToolsResult } from '@modelcontextprotocol/sdk/
 import { z, type ZodRawShape } from 'zod';
 import { zodToJsonSchema } from 'zod-to-json-schema';
 import type { GlpiClient } from '../glpi-client.js';
-import { toolError } from '../errors.js';
+import { ArgumentError, toolError } from '../errors.js';
 
 export const TOOLSETS = ['core', 'tickets', 'itil', 'assets', 'users', 'kb', 'stats', 'session', 'admin'] as const;
 export type Toolset = (typeof TOOLSETS)[number];
@@ -335,25 +337,38 @@ function formatZodError(error: z.ZodError): string {
     .join('; ');
 }
 
+const argumentError = (calledAs: string, error: ArgumentError): CallToolResult =>
+  toolError(`Invalid arguments for ${calledAs}: ${error.message}`);
+
 /**
- * Run a tool: validate (protocol error on failure), call the handler, turn
- * any non-protocol failure into an `isError` result.
+ * Run a tool: map legacy arguments (aliases), validate against the schema
+ * (protocol error on failure), call the handler. Everything the handler
+ * throws, argument problems included, becomes an `isError` result.
  */
 export async function runTool(
   def: ToolDef,
   ctx: ToolContext,
   rawArgs: Record<string, unknown>,
-  calledAs = def.name
+  calledAs = def.name,
+  mapArgs?: AliasDef['mapArgs']
 ): Promise<CallToolResult> {
-  const parsed = schemasOf(def).zod.safeParse(rawArgs);
+  let args = rawArgs;
+  if (mapArgs) {
+    try {
+      args = mapArgs(rawArgs);
+    } catch (error) {
+      if (error instanceof ArgumentError) return argumentError(calledAs, error);
+      throw error;
+    }
+  }
+  const parsed = schemasOf(def).zod.safeParse(args);
   if (!parsed.success) {
     throw new McpError(ErrorCode.InvalidParams, `Invalid arguments for ${calledAs}: ${formatZodError(parsed.error)}`);
   }
   try {
     return await def.handler(ctx, parsed.data as never);
   } catch (error) {
-    // Argument errors detected by the handler stay protocol-level.
-    if (error instanceof McpError && error.code === ErrorCode.InvalidParams) throw error;
+    if (error instanceof ArgumentError) return argumentError(calledAs, error);
     return toolError(error);
   }
 }
@@ -397,7 +412,7 @@ export function registerAll(
         inputSchema: ALIAS_SCHEMA as never,
         annotations: annotationsOf(target),
       },
-      ((args: Record<string, unknown>) => runTool(target, ctx, alias.mapArgs ? alias.mapArgs(args) : args, alias.name)) as never
+      ((args: Record<string, unknown>) => runTool(target, ctx, args, alias.name, alias.mapArgs)) as never
     );
   }
 
@@ -430,10 +445,7 @@ export function registerAll(
     const def = byName.get(name);
     if (def) return runTool(def, ctx, args);
     const entry = aliasByName.get(name);
-    if (entry) {
-      const mapped = entry.alias.mapArgs ? entry.alias.mapArgs(args) : args;
-      return runTool(entry.target, ctx, mapped, name);
-    }
+    if (entry) return runTool(entry.target, ctx, args, name, entry.alias.mapArgs);
     const reason = selection.disabled.get(name);
     if (reason) throw new McpError(ErrorCode.InvalidRequest, `Tool ${name} is disabled: ${reason}`);
     throw new McpError(ErrorCode.MethodNotFound, `Unknown tool: ${name}`);

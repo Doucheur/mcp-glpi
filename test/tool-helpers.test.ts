@@ -7,7 +7,7 @@ import { test, mock } from 'node:test';
 import { mkdtemp, mkdir, writeFile, symlink, rm, truncate } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { McpError } from '@modelcontextprotocol/sdk/types.js';
+import { ArgumentError } from '../src/errors.js';
 import { GlpiClient } from '../src/glpi-client.js';
 import {
   MAX_UPLOAD_BYTES,
@@ -42,8 +42,7 @@ function installFetch(handler: FetchHandler): string[] {
 const client = () => new GlpiClient({ url: 'https://glpi.test', userToken: 'u' });
 const json = (body: unknown) => new Response(JSON.stringify(body), { status: 200 });
 const isInvalid = (re: RegExp) => (err: unknown) => {
-  assert.ok(err instanceof McpError, `expected McpError, got ${err}`);
-  assert.equal(err.code, -32602);
+  assert.ok(err instanceof ArgumentError, `expected ArgumentError, got ${err}`);
   assert.match(err.message, re);
   return true;
 };

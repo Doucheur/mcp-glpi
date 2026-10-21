@@ -32,8 +32,9 @@ ship here, under **Fixed**. Upgrade guide: README, "Upgrading from 3.x".
   The timeline returns `{itemtype, id, count, timeline: [{kind, date, ...}]}`.
 - **Strict arguments.** Unknown keys are rejected with a JSON-RPC
   `InvalidParams` error instead of being ignored; ids must be positive
-  integers (numeric strings accepted). `include_deleted` is rejected: it
-  meant `is_deleted=1`, which lists only trashed rows. Legacy parameters
+  integers (numeric strings accepted). `include_deleted` is refused with an
+  `isError` result that explains it: it meant `is_deleted=1`, which lists
+  only trashed rows. Legacy parameters
   (`range`, `force`, `parent_id` / `child_id` / `link_type`) are still
   accepted but no longer listed.
 - **Defaults.** 25 rows per page on every list and search tool (max 500).
@@ -97,8 +98,12 @@ ship here, under **Fixed**. Upgrade guide: README, "Upgrading from 3.x".
   format, search criteria, paging and text rules.
 - GLPI and network failures come back as `isError` results with a hint line
   per GLPI error code (rights, session, unknown item or itemtype, app token,
-  IP, timeout, unreachable GLPI); argument errors, unknown and disabled tools
-  stay protocol errors.
+  IP, timeout, unreachable GLPI). Argument problems found by a handler
+  (`purge` without `confirm_id`, upload outside `GLPI_UPLOAD_DIR`, `"me"`
+  unresolved, link relation, unknown search field or sort, refused update
+  field, `include_deleted`) are `isError` results too, starting with
+  `Invalid arguments for <tool>:`. Only arguments that fail the advertised
+  schema and unknown or disabled tools are protocol errors.
 - Global in-flight limit `GLPI_MAX_CONCURRENCY` (default 8).
 - Library entry `src/lib.ts` (package `main` / `types` / `exports`), free of
   side effects: `GlpiClient`, `GlpiHttp`, `GlpiSearch`, `SearchOptionsCache`,

@@ -8,6 +8,20 @@
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import { GlpiError, GlpiTimeoutError } from './http.js';
 
+/**
+ * An argument problem found by a tool handler (purge without confirm_id,
+ * upload outside GLPI_UPLOAD_DIR, unknown search field, unresolvable "me"...).
+ * It comes back as an `isError` result the model can read and fix, like a
+ * GLPI failure. Only the schema validation of the listed arguments and
+ * unknown tool names are JSON-RPC errors.
+ */
+export class ArgumentError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'ArgumentError';
+  }
+}
+
 const RIGHTS_HINT =
   'Hint: the active GLPI profile lacks the right for this action (or the item is outside the active entities). ' +
   'Check glpi_get_session_info; glpi_set_active_profile / glpi_set_active_entity (session toolset, kept by GLPI_READ_ONLY) can switch.';

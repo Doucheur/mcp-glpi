@@ -5,12 +5,12 @@
 
 import { readFile, realpath, stat } from 'node:fs/promises';
 import { basename, extname, isAbsolute, relative, resolve } from 'node:path';
-import { ErrorCode, McpError } from '@modelcontextprotocol/sdk/types.js';
 import type { GlpiClient, TicketRelation } from './glpi-client.js';
 import type { SearchCriterion, SearchLink, SearchType } from './search.js';
 import type { SearchOptionsCatalogue } from './search-options.js';
+import { ArgumentError } from './errors.js';
 
-const invalid = (message: string) => new McpError(ErrorCode.InvalidParams, message);
+const invalid = (message: string) => new ArgumentError(message);
 
 // ---------------------------------------------------------------------------
 // Argument validation
@@ -18,7 +18,7 @@ const invalid = (message: string) => new McpError(ErrorCode.InvalidParams, messa
 
 /**
  * Read a positive integer id from the arguments. Accepts numeric strings
- * ("12") and throws InvalidParams when missing or malformed, so a missing id
+ * ("12") and throws an ArgumentError when missing or malformed, so a missing id
  * can never turn into a `PUT Problem/undefined` call.
  */
 export function requireId(args: Record<string, unknown>, key: string, min = 1): number {
@@ -82,7 +82,7 @@ export function closestOptions(catalogue: SearchOptionsCatalogue, ref: string, m
 
 /**
  * Translate criteria `field` refs (option id, uid, column or label) to option
- * ids. An unknown name is an InvalidParams error listing the closest options
+ * ids. An unknown name is an ArgumentError listing the closest options
  * (it used to fall back to field 0 and search on the wrong column).
  */
 export async function resolveCriteria(
@@ -380,7 +380,7 @@ export interface UploadSource {
   mimeType?: string;
 }
 
-function tooLarge(size: number): McpError {
+function tooLarge(size: number): ArgumentError {
   return invalid(`file is ${size} bytes; the maximum is ${MAX_UPLOAD_BYTES} bytes (20 MB)`);
 }
 

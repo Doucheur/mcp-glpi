@@ -4,14 +4,14 @@
  */
 
 import { z } from 'zod';
-import { ErrorCode, McpError } from '@modelcontextprotocol/sdk/types.js';
+import { ArgumentError } from '../errors.js';
 import type { GetOptions } from '../glpi-client.js';
 import { compactItem, listEnvelope, text } from '../output.js';
 import { advertisedAs, defineTool, type ToolDef } from './registry.js';
 import { checkPurge } from './tickets.js';
 import { fields, id, listShape, optBool, optInt, textShape, toListOptions, verbose } from './common.js';
 
-const invalid = (message: string) => new McpError(ErrorCode.InvalidParams, message);
+const invalid = (message: string) => new ArgumentError(message);
 
 export const ITEMTYPES = [
   'Computer', 'Software', 'NetworkEquipment', 'Printer', 'Monitor', 'Phone', 'Peripheral',

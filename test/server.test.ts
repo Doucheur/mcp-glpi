@@ -402,7 +402,7 @@ test('every alias is callable and reaches its target with mapped arguments', asy
 // Errors
 // ---------------------------------------------------------------------------
 
-test('unknown tool and invalid arguments are protocol errors', async () => {
+test('unknown tool and schema-invalid arguments are protocol errors', async () => {
   installFetch(() => undefined);
   const { client, close } = await connect();
   await assert.rejects(client.callTool({ name: 'glpi_nope', arguments: {} }), (e) => {
@@ -417,11 +417,48 @@ test('unknown tool and invalid arguments are protocol errors', async () => {
     return true;
   });
   await assert.rejects(client.callTool({ name: 'glpi_get_ticket', arguments: { id: 1, bogus: true } }), /bogus/);
-  await assert.rejects(
-    client.callTool({ name: 'glpi_delete_item', arguments: { itemtype: 'Computer', id: 3, purge: true } }),
-    /confirm_id/
-  );
   await close();
+});
+
+test('argument problems found by a handler are isError results with the explanation', async () => {
+  const previousDir = process.env.GLPI_UPLOAD_DIR;
+  process.env.GLPI_UPLOAD_DIR = process.cwd();
+  const calls = installFetch((c) => {
+    if (c.path === 'listSearchOptions/Computer') return json({ 1: { name: 'Name', field: 'name', uid: 'Computer.name' } });
+    if (c.path === 'getFullSession') return json({});
+    if (c.path === 'search/Bogus') {
+      return json(['ERROR_RESOURCE_NOT_FOUND_NOR_COMMONDBTM', 'resource not found or not an instance of CommonDBTM'], { status: 400 });
+    }
+    return undefined;
+  });
+  const { client, close } = await connect();
+  const cases: Array<[string, Record<string, unknown>, RegExp]> = [
+    ['glpi_delete_item', { itemtype: 'Computer', id: 3, purge: true }, /confirm_id/],
+    ['glpi_delete_ticket', { id: 5, force: true }, /confirm_id/],
+    ['glpi_upload_document', { file_path: '..' }, /inside GLPI_UPLOAD_DIR/],
+    ['glpi_search_tickets', { assigned_user_id: 'me' }, /Cannot resolve "me"/],
+    ['glpi_link_tickets', { ticket_id: 4, other_ticket_id: 4 }, /itself/],
+    ['glpi_link_tickets', { parent_id: 4, child_id: 5, link_type: 9 }, /link_type must be/],
+    ['glpi_list_items', { itemtype: 'Computer', include_deleted: true }, /include_deleted was removed/],
+    ['glpi_list_problems', { include_deleted: false }, /include_deleted was removed/],
+    ['glpi_count', { itemtype: 'Computer', criteria: [{ field: 'nmae', searchtype: 'contains', value: 'x' }] }, /not a search option of Computer/],
+    ['glpi_update_item', { itemtype: 'Computer', id: 1, input: { ram: 1 } }, /Allowed: name/],
+    ['glpi_update_problem', { id: 1 }, /nothing to update/],
+    ['glpi_search_v2', { itemtype: 'Bogus' }, /ERROR_RESOURCE_NOT_FOUND_NOR_COMMONDBTM[\s\S]*unknown itemtype/],
+  ];
+  try {
+    for (const [name, args, expected] of cases) {
+      const res = await client.callTool({ name, arguments: args });
+      assert.equal(res.isError, true, `${name} ${JSON.stringify(args)}: isError`);
+      assert.match(resultText(res), expected, name);
+      if (!/^GLPI /.test(resultText(res))) assert.match(resultText(res), new RegExp(`^Invalid arguments for ${name}: `));
+    }
+    assert.ok(!calls.some((c) => c.method === 'DELETE' || c.path === 'Document'), 'nothing was written');
+  } finally {
+    if (previousDir === undefined) delete process.env.GLPI_UPLOAD_DIR;
+    else process.env.GLPI_UPLOAD_DIR = previousDir;
+    await close();
+  }
 });
 
 test('a GLPI 403 ERROR_RIGHT_MISSING comes back as isError with a hint', async () => {
@@ -544,11 +581,12 @@ test('glpi_add_followup with itemtype Problem posts an ITILFollowup on the probl
 test('glpi_update_item enforces the Computer whitelist; delete_ticket purge needs confirm_id', async () => {
   const calls = installFetch(() => json([{ 'Ticket/5': true }]));
   const { client, close } = await connect();
-  await assert.rejects(
-    client.callTool({ name: 'glpi_update_item', arguments: { itemtype: 'Computer', id: 1, input: { ram: 1 } } }),
-    /Allowed: name/
-  );
-  await assert.rejects(client.callTool({ name: 'glpi_delete_ticket', arguments: { id: 5, force: true } }), /confirm_id/);
+  const refused = await client.callTool({ name: 'glpi_update_item', arguments: { itemtype: 'Computer', id: 1, input: { ram: 1 } } });
+  assert.equal(refused.isError, true);
+  assert.match(resultText(refused), /Allowed: name/);
+  const unconfirmed = await client.callTool({ name: 'glpi_delete_ticket', arguments: { id: 5, force: true } });
+  assert.equal(unconfirmed.isError, true);
+  assert.match(resultText(unconfirmed), /confirm_id/);
   const res = await client.callTool({ name: 'glpi_delete_ticket', arguments: { id: 5, purge: true, confirm_id: 5 } });
   assert.deepEqual(resultJson(res), { success: true, id: 5, purged: true });
   assert.equal(calls.at(-1)?.query.get('force_purge'), '1');

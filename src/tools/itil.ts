@@ -5,7 +5,7 @@
  */
 
 import { z } from 'zod';
-import { ErrorCode, McpError } from '@modelcontextprotocol/sdk/types.js';
+import { ArgumentError } from '../errors.js';
 import { compactItem, listEnvelope, text } from '../output.js';
 import { defineTool, type ToolDef } from './registry.js';
 import {
@@ -124,7 +124,7 @@ function itilTools(itemtype: 'Problem' | 'Change'): ToolDef[] {
       const { id: itemId, ...fields } = a;
       const updates = defined(fields);
       if (Object.keys(updates).length === 0) {
-        throw new McpError(ErrorCode.InvalidParams, 'nothing to update: pass at least one field besides id');
+        throw new ArgumentError('nothing to update: pass at least one field besides id');
       }
       await client.updateItem(itemtype, itemId, updates);
       return text({ success: true, id: itemId });

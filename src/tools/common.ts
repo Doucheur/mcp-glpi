@@ -8,6 +8,7 @@
 
 import { z } from 'zod';
 import type { ListOptions } from '../glpi-client.js';
+import { ArgumentError } from '../errors.js';
 import { pageLimit } from '../output.js';
 import { hidden } from './registry.js';
 
@@ -96,6 +97,8 @@ export const listShape = {
   ...pageShape,
   /** v3 "START-END"; accepted, not advertised. */
   range: hidden(optStr('Legacy START-END')),
+  /** v3 parameter, removed: accepted so the handler can explain why. */
+  include_deleted: hidden(z.unknown().optional()),
   sort: sortSchema,
   order: orderSchema,
   expand_dropdowns: expandDropdowns,
@@ -106,14 +109,20 @@ export interface ListArgs {
   start?: number;
   limit?: number;
   range?: string;
+  include_deleted?: unknown;
   sort?: string | number;
   order?: 'ASC' | 'DESC';
   expand_dropdowns?: boolean;
   is_deleted?: boolean;
 }
 
+export const INCLUDE_DELETED_REMOVED =
+  'include_deleted was removed: it meant is_deleted=true, which lists only the trashed rows. ' +
+  'Omit it for the active rows, or pass is_deleted: true for the trash.';
+
 /** start/limit (or legacy range) -> ListOptions + the effective start. */
 export function toListOptions(args: ListArgs, defaultOrder?: 'ASC' | 'DESC'): { opts: ListOptions; start: number; limit: number } {
+  if (args.include_deleted !== undefined) throw new ArgumentError(INCLUDE_DELETED_REMOVED);
   let start = args.start ?? 0;
   let limit = pageLimit(args.limit);
   const m = args.range?.match(/^\s*(\d+)\s*-\s*(\d+)\s*$/);
