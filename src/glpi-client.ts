@@ -23,7 +23,7 @@ import { SearchOptionsCache } from './search-options.js';
 // CONFIG / INTERFACES
 // ============================================================================
 
-export interface GlpiConfig extends GlpiHttpConfig {}
+export type GlpiConfig = GlpiHttpConfig;
 
 export interface GlpiTicket {
   id: number;
