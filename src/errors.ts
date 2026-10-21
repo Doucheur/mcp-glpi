@@ -10,7 +10,7 @@ import { GlpiError, GlpiTimeoutError } from './http.js';
 
 const RIGHTS_HINT =
   'Hint: the active GLPI profile lacks the right for this action (or the item is outside the active entities). ' +
-  'Check glpi_get_session_info; glpi_set_active_profile / glpi_set_active_entity can switch.';
+  'Check glpi_get_session_info; glpi_set_active_profile / glpi_set_active_entity (session toolset, kept by GLPI_READ_ONLY) can switch.';
 
 /** Hint line per GLPI error code. */
 export const GLPI_ERROR_HINTS: Record<string, string> = {

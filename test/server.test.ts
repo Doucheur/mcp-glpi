@@ -261,14 +261,26 @@ test('GLPI_LEGACY_TOOLS=1 also lists the aliases', async () => {
   assert.match(followups?.description ?? '', /glpi_get_ticket_timeline/);
 });
 
-test('GLPI_READ_ONLY=1 lists only read-only tools; writes are refused at protocol level', async () => {
+test('GLPI_READ_ONLY=1 lists the read-only tools and the session switches; writes are refused at protocol level', async () => {
   const options = parseRegistryOptions({ GLPI_READ_ONLY: 'true' });
   const tools = await listNames(options);
-  const expected = ALL_TOOLS.filter((d) => annotationsOf(d).readOnlyHint === true).map((d) => d.name).sort();
+  const expected = ALL_TOOLS.filter((d) => annotationsOf(d).readOnlyHint === true || d.toolset === 'session')
+    .map((d) => d.name)
+    .sort();
   assert.deepEqual(tools.map((t) => t.name).sort(), expected);
-  assert.ok(tools.every((t) => t.annotations?.readOnlyHint === true));
+  assert.equal(expected.length, 23);
+  const sessionSwitches = ['glpi_set_active_entity', 'glpi_set_active_profile'];
+  for (const t of tools) {
+    if (sessionSwitches.includes(t.name)) {
+      assert.equal(t.annotations?.destructiveHint, false, `${t.name} is not destructive`);
+      assert.notEqual(t.annotations?.readOnlyHint, true);
+    } else {
+      assert.equal(t.annotations?.readOnlyHint, true, t.name);
+    }
+  }
   assert.ok(expected.includes('glpi_search_tickets') && !expected.includes('glpi_create_ticket'));
 
+  const calls = installFetch(() => json({}));
   const { client, close } = await connect(options);
   await assert.rejects(client.callTool({ name: 'glpi_create_ticket', arguments: { name: 'x', content: 'y' } }), (e) => {
     assert.ok(e instanceof McpError);
@@ -277,17 +289,27 @@ test('GLPI_READ_ONLY=1 lists only read-only tools; writes are refused at protoco
   });
   // An alias of a write tool is refused too.
   await assert.rejects(client.callTool({ name: 'glpi_create_group', arguments: { name: 'g' } }), McpError);
+  // The session switches still run.
+  const switched = await client.callTool({ name: 'glpi_set_active_entity', arguments: { entity_id: 3, is_recursive: true } });
+  assert.ok(!switched.isError, resultText(switched));
+  assert.ok(calls.some((c) => c.path === 'changeActiveEntities'));
   await close();
 });
 
-test('GLPI_TOOLSETS=tickets lists only the tickets toolset', async () => {
+test('GLPI_TOOLSETS=tickets lists the tickets toolset plus the always-on core', async () => {
   const tools = await listNames(parseRegistryOptions({ GLPI_TOOLSETS: 'tickets' }));
-  const expected = ALL_TOOLS.filter((d) => d.toolset === 'tickets').map((d) => d.name).sort();
+  const expected = ALL_TOOLS.filter((d) => d.toolset === 'tickets' || d.toolset === 'core').map((d) => d.name).sort();
   assert.deepEqual(tools.map((t) => t.name).sort(), expected);
-  assert.equal(expected.length, 18);
+  assert.equal(expected.length, 24);
+  const core = ALL_TOOLS.filter((d) => d.toolset === 'core').map((d) => d.name).sort();
+  assert.deepEqual(core, [
+    'glpi_count', 'glpi_get_item', 'glpi_get_session_info', 'glpi_list_items', 'glpi_list_search_options', 'glpi_search_v2',
+  ]);
+  // Write item tools stay in assets.
+  assert.ok(!tools.some((t) => t.name === 'glpi_create_item'));
   const warnings: string[] = [];
-  const opts = parseRegistryOptions({ GLPI_TOOLSETS: 'tickets, bogus,STATS' }, (m) => warnings.push(m));
-  assert.deepEqual([...(opts.toolsets ?? [])].sort(), ['stats', 'tickets']);
+  const opts = parseRegistryOptions({ GLPI_TOOLSETS: 'tickets, bogus,STATS,core' }, (m) => warnings.push(m));
+  assert.deepEqual([...(opts.toolsets ?? [])].sort(), ['core', 'stats', 'tickets']);
   assert.equal(warnings.length, 1);
 });
 

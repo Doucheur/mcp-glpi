@@ -71,7 +71,7 @@ const inputSchema = z.record(z.unknown()).describe('GLPI columns, e.g. {"name":"
 const listItems = defineTool({
   name: 'glpi_list_items',
   title: 'List items',
-  toolset: 'assets',
+  toolset: 'core',
   description:
     'List items of one itemtype (assets, KB, contracts, groups, entities...) as compact rows. For criteria use glpi_search_v2.',
   inputSchema: {
@@ -94,7 +94,7 @@ const listItems = defineTool({
 const getItem = defineTool({
   name: 'glpi_get_item',
   title: 'Get item',
-  toolset: 'assets',
+  toolset: 'core',
   description: 'One item of any itemtype, compact, optionally with related data (ports, software, documents...).',
   inputSchema: {
     itemtype: itemtypeSchema,

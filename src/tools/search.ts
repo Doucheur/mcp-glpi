@@ -6,7 +6,7 @@
 import { z } from 'zod';
 import { pageLimit, text } from '../output.js';
 import { type CriteriaArg, resolveCriteria } from '../tool-helpers.js';
-import { defineTool, type ToolDef } from './registry.js';
+import { advertisedAs, defineTool, type ToolDef } from './registry.js';
 import { expandDropdowns, isDeleted, optBool, optStr, pageShape, searchPageShape, textShape } from './common.js';
 import { resolveSearchSort, searchEnvelope } from './search-rows.js';
 
@@ -30,6 +30,16 @@ const criteriaSchema = z
 
 const itemtypeArg = z.string().min(1).describe('GLPI itemtype, case-sensitive');
 
+/**
+ * glpi_count validates the same criteria but lists them once, on
+ * glpi_search_v2 (`describe` makes a distinct schema instance to tag).
+ */
+const countCriteriaSchema = advertisedAs(criteriaSchema.describe('As in glpi_search_v2'), {
+  type: 'array',
+  items: { type: 'object' },
+  description: 'As in glpi_search_v2',
+});
+
 function toCriteriaArgs(criteria: z.infer<typeof criteriaSchema>): CriteriaArg[] {
   return (criteria ?? []).map((c) => ({ ...c, value: c.value ?? '' }));
 }
@@ -37,7 +47,7 @@ function toCriteriaArgs(criteria: z.infer<typeof criteriaSchema>): CriteriaArg[]
 const searchV2 = defineTool({
   name: 'glpi_search_v2',
   title: 'Search any itemtype',
-  toolset: 'search',
+  toolset: 'core',
   description:
     'Search any itemtype with criteria; rows have readable keys. For tickets prefer glpi_search_tickets.',
   inputSchema: {
@@ -70,11 +80,11 @@ const searchV2 = defineTool({
 const count = defineTool({
   name: 'glpi_count',
   title: 'Count items',
-  toolset: 'search',
+  toolset: 'core',
   description: 'Count the items matching criteria, without rows.',
   inputSchema: {
     itemtype: itemtypeArg,
-    criteria: criteriaSchema,
+    criteria: countCriteriaSchema,
   },
   handler: async ({ client }, a) => {
     const criteria = await resolveCriteria(client, a.itemtype, toCriteriaArgs(a.criteria));
@@ -85,7 +95,7 @@ const count = defineTool({
 const listSearchOptions = defineTool({
   name: 'glpi_list_search_options',
   title: 'List search options',
-  toolset: 'search',
+  toolset: 'core',
   description: 'Searchable fields of an itemtype (id, uid, column, datatype, searchtypes) to build criteria.',
   inputSchema: {
     itemtype: itemtypeArg,

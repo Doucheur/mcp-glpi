@@ -126,7 +126,7 @@ function pickName(obj: unknown): { id?: unknown; name?: unknown } | unknown {
 const getSessionInfo = defineTool({
   name: 'glpi_get_session_info',
   title: 'Get session info',
-  toolset: 'session',
+  toolset: 'core',
   description: 'Connected user (me), active profile and entity, and the profiles and entities available.',
   inputSchema: {
     verbose,
@@ -164,14 +164,14 @@ const getSessionInfo = defineTool({
   },
 });
 
-const SHARED_SESSION_NOTE = ' for every client of this server: the session is shared.';
+const SHARED_SESSION_NOTE = ' of the session shared by all clients.';
 
 const setActiveEntity = defineTool({
   name: 'glpi_set_active_entity',
   title: 'Set active entity',
   toolset: 'session',
   annotations: { destructiveHint: false },
-  description: 'Switch the active entity (ids from glpi_get_session_info)' + SHARED_SESSION_NOTE,
+  description: 'Switch the active entity' + SHARED_SESSION_NOTE,
   inputSchema: {
     entity_id: z
       .union([z.number().int().min(0), z.literal('all')])
@@ -189,7 +189,7 @@ const setActiveProfile = defineTool({
   title: 'Set active profile',
   toolset: 'session',
   annotations: { destructiveHint: false },
-  description: 'Switch the active profile (ids from glpi_get_session_info)' + SHARED_SESSION_NOTE,
+  description: 'Switch the active profile' + SHARED_SESSION_NOTE,
   inputSchema: {
     profile_id: id(),
   },

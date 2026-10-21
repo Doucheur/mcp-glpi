@@ -24,13 +24,19 @@ import { zodToJsonSchema } from 'zod-to-json-schema';
 import type { GlpiClient } from '../glpi-client.js';
 import { toolError } from '../errors.js';
 
-export const TOOLSETS = ['tickets', 'itil', 'assets', 'users', 'kb', 'search', 'stats', 'session', 'admin'] as const;
+export const TOOLSETS = ['core', 'tickets', 'itil', 'assets', 'users', 'kb', 'stats', 'session', 'admin'] as const;
 export type Toolset = (typeof TOOLSETS)[number];
 
+/**
+ * Always registered, whatever GLPI_TOOLSETS says: generic read, search and
+ * session discovery, which every other toolset relies on.
+ */
+export const CORE_TOOLSET: Toolset = 'core';
+
 export interface RegistryOptions {
-  /** Only these toolsets are registered (default: all). */
+  /** Only these toolsets (plus `core`) are registered (default: all). */
   toolsets?: ReadonlySet<Toolset>;
-  /** Only read-only tools are registered. */
+  /** Only read-only tools (and the session switches) are registered. */
   readOnly?: boolean;
   /** List the hidden v3 aliases too. */
   legacyTools?: boolean;
@@ -103,6 +109,14 @@ export function isReadOnly(def: ToolDef): boolean {
   return annotationsOf(def).readOnlyHint === true;
 }
 
+/**
+ * Kept by GLPI_READ_ONLY=1: read-only tools, and the `session` toolset
+ * (active entity / profile switches change the session context, not GLPI data).
+ */
+export function allowedReadOnly(def: ToolDef): boolean {
+  return isReadOnly(def) || def.toolset === 'session';
+}
+
 // ---------------------------------------------------------------------------
 // Options from the environment
 // ---------------------------------------------------------------------------
@@ -140,9 +154,9 @@ export function selectTools(defs: readonly ToolDef[], aliases: readonly AliasDef
   const tools: ToolDef[] = [];
   const disabled = new Map<string, string>();
   for (const def of defs) {
-    if (options.toolsets && !options.toolsets.has(def.toolset)) {
+    if (options.toolsets && def.toolset !== CORE_TOOLSET && !options.toolsets.has(def.toolset)) {
       disabled.set(def.name, `toolset "${def.toolset}" is not enabled (GLPI_TOOLSETS)`);
-    } else if (options.readOnly && !isReadOnly(def)) {
+    } else if (options.readOnly && !allowedReadOnly(def)) {
       disabled.set(def.name, 'the server runs read-only (GLPI_READ_ONLY=1)');
     } else {
       tools.push(def);

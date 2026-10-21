@@ -84,8 +84,12 @@ ship here, under **Fixed**. Upgrade guide: README, "Upgrading from 3.x".
 - Resource templates `glpi://ticket/{id}` (ticket and its last 10 timeline
   entries, in the `glpi_get_ticket_timeline` shape), `glpi://kb/{id}` (article as plain text), `glpi://user/{id}`. The
   fixed resources return list envelopes with compact rows.
-- `GLPI_TOOLSETS` (`tickets`, `itil`, `assets`, `users`, `kb`, `search`,
-  `stats`, `session`, `admin`) and `GLPI_READ_ONLY=1` (21 read-only tools);
+- `GLPI_TOOLSETS` (`tickets`, `itil`, `assets`, `users`, `kb`, `stats`,
+  `session`, `admin`; `core` = `glpi_list_items`, `glpi_get_item`,
+  `glpi_search_v2`, `glpi_count`, `glpi_list_search_options`,
+  `glpi_get_session_info` is always registered) and `GLPI_READ_ONLY=1`
+  (21 read-only tools plus the 2 session switches, which change the session
+  context, not GLPI data);
   a disabled tool answers with the reason. `GLPI_LEGACY_TOOLS=1` lists the
   aliases. HTTP mode warns at startup when `GLPI_READ_ONLY` is unset.
 - Server `instructions` (sent once per session): when to use which tool,
@@ -208,8 +212,8 @@ Other:
 - No password through this server: `glpi_create_user` has no `password`
   parameter, and `password` / `password2` are refused on `User` items.
 - Writes are never retried after a timeout or a 5xx (see Fixed).
-- `GLPI_READ_ONLY=1` removes every write tool; HTTP mode warns when it is
-  unset.
+- `GLPI_READ_ONLY=1` removes every write tool (the session switches stay);
+  HTTP mode warns when it is unset.
 
 ### Credits
 

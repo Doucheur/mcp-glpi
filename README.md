@@ -123,8 +123,8 @@ See [Security notes](#security-notes) before exposing the port.
 | `GLPI_MAX_RETRIES` | `2` | Retries per call (see [Retries](#retries)); `0` disables them |
 | `GLPI_MAX_CONCURRENCY` | `8` | Maximum GLPI calls in flight for the whole process |
 | `GLPI_DEBUG` | off | Any value: log retries and re-authentication to stderr, keep raw search options in memory |
-| `GLPI_TOOLSETS` | `all` | Comma-separated toolsets to register (see [Tool catalogue](#tool-catalogue)); unknown names are ignored with a warning |
-| `GLPI_READ_ONLY` | off | `1`/`true`/`yes`/`on`: register only the read-only tools (21) |
+| `GLPI_TOOLSETS` | `all` | Comma-separated toolsets to register on top of `core`, which is always registered (see [Tool catalogue](#tool-catalogue)); unknown names are ignored with a warning |
+| `GLPI_READ_ONLY` | off | `1`/`true`/`yes`/`on`: register only the 21 read-only tools and the 2 `session` switches, which change the session context, not GLPI data (23) |
 | `GLPI_LEGACY_TOOLS` | off | `1`/`true`/`yes`/`on`: also list the 50 v3 aliases in `tools/list` (they are callable either way) |
 | `GLPI_UPLOAD_DIR` | none | Directory `glpi_upload_document` may read `file_path` from. Unset: uploads by path are refused, `content_base64` still works |
 | `MCP_TRANSPORT` | `stdio` | `stdio` or `http` |
@@ -146,10 +146,15 @@ once and the call replayed.
 
 ## Tool catalogue
 
-46 tools in 9 toolsets. **W** marks write tools (removed by
-`GLPI_READ_ONLY=1`); the others carry `readOnlyHint: true`. Updates, status
-changes, assignments and deletes also carry `destructiveHint: true`. Every
-tool rejects unknown arguments.
+46 tools in 9 toolsets: `core`, `tickets`, `itil`, `assets`, `users`,
+`admin`, `session`, `kb`, `stats`. **`core`** (`glpi_list_items`,
+`glpi_get_item`, `glpi_search_v2`, `glpi_count`, `glpi_list_search_options`,
+`glpi_get_session_info`) is always registered, whatever `GLPI_TOOLSETS` says:
+`GLPI_TOOLSETS=tickets` lists the 18 ticket tools and these 6. **W** marks
+write tools (removed by `GLPI_READ_ONLY=1`); the others carry
+`readOnlyHint: true`. The two `session` switches are kept in read-only mode
+and carry `destructiveHint: false`. Updates, status changes, assignments and
+deletes carry `destructiveHint: true`. Every tool rejects unknown arguments.
 
 ### `tickets` (18)
 
@@ -197,7 +202,7 @@ item. Problems have no validations.
 To filter problems or changes, use `glpi_search_v2`. Their followups, tasks
 and solutions go through the ticket tools with `itemtype`.
 
-### `assets` (5): generic item tools
+### `core` (2) and `assets` (3): generic item tools
 
 These work on 24 itemtypes: `Computer`, `Software`, `NetworkEquipment`,
 `Printer`, `Monitor`, `Phone`, `Peripheral`, `Rack`, `Enclosure`, `PDU`,
@@ -207,15 +212,15 @@ These work on 24 itemtypes: `Computer`, `Software`, `NetworkEquipment`,
 
 | Tool | | Main parameters | What it does |
 |---|---|---|---|
-| `glpi_list_items` | | `itemtype`, paging, `sort`, `order`, `search_text`, `is_deleted`, `expand_dropdowns`, `fields`, `verbose` | Compact rows of one itemtype; `search_text` = `{column: "substring"}`, `"^x$"` for exact |
-| `glpi_get_item` | | `itemtype`, `id`, `with`, `verbose` | One item; `with` embeds `softwares`, `networkports`, `connections`, `disks`, `documents`, `infocoms`, `contracts`, `tickets`, `problems`, `changes`, `logs` |
+| `glpi_list_items` | core | `itemtype`, paging, `sort`, `order`, `search_text`, `is_deleted`, `expand_dropdowns`, `fields`, `verbose` | Compact rows of one itemtype; `search_text` = `{column: "substring"}`, `"^x$"` for exact |
+| `glpi_get_item` | core | `itemtype`, `id`, `with`, `verbose` | One item; `with` embeds `softwares`, `networkports`, `connections`, `disks`, `documents`, `infocoms`, `contracts`, `tickets`, `problems`, `changes`, `logs` |
 | `glpi_create_item` | W | `itemtype`, `input` | Create from GLPI column values, e.g. `{"name":"PC-42","locations_id":3}` |
 | `glpi_update_item` | W | `itemtype`, `id`, `input` | Change the given columns; `Computer`, `Project`, `Ticket`, `Problem`, `Change` accept only their usual fields |
 | `glpi_delete_item` | W | `itemtype`, `id`, `purge`, `confirm_id` | Trash, or purge with `confirm_id` = `id` |
 
 `input` never accepts `password` / `password2` for `User`.
 
-### `users` (3), `admin` (2), `session` (3)
+### `users` (3), `admin` (2), `session` (2)
 
 | Tool | | Main parameters | What it does |
 |---|---|---|---|
@@ -224,17 +229,17 @@ These work on 24 itemtypes: `Computer`, `Software`, `NetworkEquipment`,
 | `glpi_find_user` | | `query`, `exact`, `limit` (default 10, max 50) | Match login, last name or first name; exact login first. `exact: true` returns that login or `null` |
 | `glpi_create_user` | W (admin) | `name` (login), `realname`, `firstname`, `email`, `phone`, `profiles_id`, `entities_id` | Create an account, without password; `email` becomes a GLPI user e-mail (`_useremails`) |
 | `glpi_add_user_to_group` | W (admin) | `user_id`, `group_id`, `is_manager` | Group membership |
-| `glpi_get_session_info` | | `verbose` | `me` (connected user id and names), active profile and entity, available profiles and entities |
-| `glpi_set_active_entity` | W (session) | `entity_id` (id or `"all"`), `is_recursive` | Switch the active entity of the shared session |
-| `glpi_set_active_profile` | W (session) | `profile_id` | Switch the active profile of the shared session |
+| `glpi_get_session_info` | core | `verbose` | `me` (connected user id and names), active profile and entity, available profiles and entities |
+| `glpi_set_active_entity` | session | `entity_id` (id or `"all"`), `is_recursive` | Switch the active entity of the shared session |
+| `glpi_set_active_profile` | session | `profile_id` | Switch the active profile of the shared session |
 
-### `search` (3), `kb` (2), `stats` (2)
+### `core` search (3), `kb` (2), `stats` (2)
 
 | Tool | | Main parameters | What it does |
 |---|---|---|---|
-| `glpi_search_v2` | | `itemtype`, `criteria`, `forcedisplay`, paging, `sort`, `order`, `fetch_all`, `max_rows`, `expand_dropdowns`, `is_deleted` | Search any itemtype; rows with readable keys |
-| `glpi_count` | | `itemtype`, `criteria` | `{itemtype, totalcount}` without rows |
-| `glpi_list_search_options` | | `itemtype`, `query` | Searchable fields (id, uid, column, datatype, searchtypes) |
+| `glpi_search_v2` | core | `itemtype`, `criteria`, `forcedisplay`, paging, `sort`, `order`, `fetch_all`, `max_rows`, `expand_dropdowns`, `is_deleted` | Search any itemtype; rows with readable keys |
+| `glpi_count` | core | `itemtype`, `criteria` | `{itemtype, totalcount}` without rows |
+| `glpi_list_search_options` | core | `itemtype`, `query` | Searchable fields (id, uid, column, datatype, searchtypes) |
 | `glpi_search_knowbase` | | `query`, `start`, `limit` | KB articles whose title contains `query` |
 | `glpi_create_knowbase_item` | W | `name`, `answer`, `is_faq`, `knowbaseitemcategories_id` | Create a KB article |
 | `glpi_tickets_stats_by` | | `dimension` (`status`, `category`, `technician`, `entity`, `month`), `date_from`, `date_to`, `entity_id` | Ticket counts per dimension and `total`; `month` covers the last 6 months by default, 36 at most |
@@ -305,7 +310,7 @@ Three kinds of failure, so a model can tell what to fix:
 
 ```
 GLPI POST ITILFollowup -> 403 ERROR_RIGHT_MISSING: You don't have permission to perform this action.
-Hint: the active GLPI profile lacks the right for this action (or the item is outside the active entities). Check glpi_get_session_info; glpi_set_active_profile / glpi_set_active_entity can switch.
+Hint: the active GLPI profile lacks the right for this action (or the item is outside the active entities). Check glpi_get_session_info; glpi_set_active_profile / glpi_set_active_entity (session toolset, kept by GLPI_READ_ONLY) can switch.
 ```
 
 Hints cover expired or missing sessions, missing rights, `ERROR_GLPI_ADD` /
@@ -489,7 +494,9 @@ The 37 other v3 names are unchanged v4 tools.
 ## Security notes
 
 - **Writes change production data.** `GLPI_READ_ONLY=1` registers only the 21
-  read-only tools; write calls then fail at protocol level. Without it, every
+  read-only tools and the 2 session switches (`glpi_set_active_entity`,
+  `glpi_set_active_profile`: they change the session context, not GLPI
+  data); write calls then fail at protocol level. Without it, every
   write tool is annotated so clients can ask for confirmation, and the server
   instructions tell the model to confirm with the user first.
 - **The GLPI account sets the ceiling.** The server can do what the configured
