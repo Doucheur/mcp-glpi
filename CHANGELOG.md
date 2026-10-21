@@ -111,6 +111,10 @@ ship here, under **Fixed**. Upgrade guide: README, "Upgrading from 3.x".
   `Invalid arguments for <tool>:`. Only arguments that fail the advertised
   schema and unknown or disabled tools are protocol errors.
 - Global in-flight limit `GLPI_MAX_CONCURRENCY` (default 8).
+- Stricter numeric settings: `GLPI_TIMEOUT_MS` and `GLPI_MAX_CONCURRENCY`
+  must be positive integers and `GLPI_MAX_RETRIES` a non-negative one
+  (`0` = no retry); `0` timeout or concurrency, negative or non-numeric
+  values (`15s`) stop the server at startup with the variable name.
 - Library entry `src/lib.ts` (package `main` / `types` / `exports`), free of
   side effects: `GlpiClient`, `GlpiHttp`, `GlpiSearch`, `SearchOptionsCache`,
   `createMcpServer`, the tool catalogue, the ITIL code tables, error and

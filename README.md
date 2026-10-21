@@ -119,9 +119,9 @@ See [Security notes](#security-notes) before exposing the port.
 | `GLPI_APP_TOKEN` | none | API client token (**Setup > General > API**), if the API client has one |
 | `GLPI_USER_TOKEN` | none | User API token. Either this or `GLPI_USERNAME` + `GLPI_PASSWORD` is required |
 | `GLPI_USERNAME`, `GLPI_PASSWORD` | none | Login and password (basic auth on `initSession`) when no user token is set |
-| `GLPI_TIMEOUT_MS` | `15000` | Timeout of one GLPI call, body read included. Use a positive value |
+| `GLPI_TIMEOUT_MS` | `15000` | Timeout of one GLPI call, body read included. Positive integer (`0` is refused at startup) |
 | `GLPI_MAX_RETRIES` | `2` | Retries per call (see [Retries](#retries)); `0` disables them |
-| `GLPI_MAX_CONCURRENCY` | `8` | Maximum GLPI calls in flight for the whole process |
+| `GLPI_MAX_CONCURRENCY` | `8` | Maximum GLPI calls in flight for the whole process. Positive integer (`0` is refused at startup) |
 | `GLPI_DEBUG` | off | Any value: log retries and re-authentication to stderr, keep raw search options in memory |
 | `GLPI_TOOLSETS` | `all` | Comma-separated toolsets to register on top of `core`, which is always registered (see [Tool catalogue](#tool-catalogue)); unknown names are ignored with a warning |
 | `GLPI_READ_ONLY` | off | `1`/`true`/`yes`/`on`: register only the 21 read-only tools and the 2 `session` switches, which change the session context, not GLPI data (23) |

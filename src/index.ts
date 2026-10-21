@@ -6,7 +6,8 @@
  */
 
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
-import { GlpiClient, GlpiConfig } from './glpi-client.js';
+import { parseGlpiConfig } from './config.js';
+import { GlpiClient } from './glpi-client.js';
 import {
   ConfigError,
   HttpTransportConfig,
@@ -15,42 +16,6 @@ import {
   startHttpMcpServer,
 } from './http-server.js';
 import { SERVER_VERSION, type ServerOptions, createMcpServer, parseServerOptions } from './server.js';
-
-function envInt(name: string): number | undefined {
-  const raw = process.env[name];
-  if (!raw) return undefined;
-  const n = parseInt(raw, 10);
-  if (isNaN(n) || n < 0) throw new Error(`${name} must be a non-negative integer, got "${raw}"`);
-  return n;
-}
-
-function getConfig(): GlpiConfig {
-  const url = process.env.GLPI_URL;
-  if (!url) throw new Error('GLPI_URL environment variable is required');
-  try {
-    new URL(url);
-  } catch {
-    throw new Error(`GLPI_URL is not a valid URL: "${url}"`);
-  }
-
-  const userToken = process.env.GLPI_USER_TOKEN;
-  const username = process.env.GLPI_USERNAME;
-  const password = process.env.GLPI_PASSWORD;
-  if (!userToken && !(username && password)) {
-    throw new Error('No authentication configured. Set GLPI_USER_TOKEN, or GLPI_USERNAME + GLPI_PASSWORD.');
-  }
-
-  return {
-    url,
-    appToken: process.env.GLPI_APP_TOKEN,
-    userToken,
-    username,
-    password,
-    timeoutMs: envInt('GLPI_TIMEOUT_MS'),
-    maxRetries: envInt('GLPI_MAX_RETRIES'),
-    maxConcurrency: envInt('GLPI_MAX_CONCURRENCY') || undefined,
-  };
-}
 
 /**
  * The GLPI client is process-wide: one GLPI session shared by every MCP
@@ -136,7 +101,7 @@ async function main() {
       throw error;
     }
 
-    const config = getConfig();
+    const config = parseGlpiConfig(process.env);
     serverOptions = parseServerOptions(process.env);
     client = new GlpiClient(config);
 
