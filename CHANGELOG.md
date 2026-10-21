@@ -1,5 +1,86 @@
 # Changelog
 
+## 3.5.0 — 2026-10-21
+
+Corrective release (to be folded into 4.0.0).
+
+### Fixed — HTTP layer
+- Writes are no longer replayed after an ambiguous failure: only GET is
+  retried after a network error, a timeout or a 5xx; POST/PUT/DELETE are
+  retried only after ECONNREFUSED / ENOTFOUND / EAI_AGAIN (request never
+  sent). 429 is still retried for every method.
+- Retry-After and exponential backoff are capped at 30 s, with ±20 % jitter;
+  Retry-After also accepts an HTTP date.
+- The response body is read inside the timeout window, so a stalled body
+  aborts instead of hanging.
+- `initSession` fails clearly when GLPI returns no `session_token`.
+- Concurrent 401s: the session is dropped/refreshed only if it is still the
+  token the failing request used.
+- `killSession` uses the current token and never re-authenticates.
+- New global in-flight limit (`GLPI_MAX_CONCURRENCY`, default 8).
+
+### Fixed — search and data
+- `search/{itemtype}` rows (glpi_search_v2, glpi_search_tickets,
+  glpi_list_overdue_tickets, glpi_search, glpi_search_knowbase, resources)
+  now use readable keys instead of numeric option ids: own column -> field
+  name (`status`), joined column -> last two uid segments
+  (`itilcategory_completename`), collisions suffixed with the option id
+  (`user_name_4` requester, `user_name_5` technician). `uid_cols` is not
+  used: GLPI merges requester and technician under one uid key.
+- `SearchOptionsCache`: one in-flight fetch per itemtype, failures not
+  cached, raw entries kept only with `GLPI_DEBUG`.
+- `glpi_list_users` (active filter) returns the same shape as the plain list
+  and honours sort/order; this also fixes `glpi_tickets_stats_by
+  dimension=technician`, which read fields the search rows did not have.
+- `glpi_search_user` matches the login exactly (including logins stored with
+  trailing spaces) and errors when several accounts share it, instead of
+  returning the first partial match.
+- `glpi_list_tickets` with `status` filters server-side (it used to filter
+  one page client-side and miss most matches).
+- Resources `glpi://problems/open` (statuses 1,2,3,4,7,8) and
+  `glpi://changes/pending` (1,2,3,4,7,9,10,11,12) use server-side status
+  criteria, newest `date_mod` first, 50 rows (the old `status < 5` / `< 8`
+  filters dropped Accepted/Observed problems and mis-classified changes).
+- `glpi_tickets_stats_by dimension=month`: month boundaries in local time
+  (UTC conversion shifted them by the timezone offset), tickets created at
+  00:00:00 on the 1st are counted, at most 36 months.
+- `glpi_list_overdue_tickets` compares with local time and resolves the
+  `time_to_resolve` option dynamically (18 as fallback); `glpi_search_tickets`
+  resolves its Ticket fields the same way.
+- Criteria with an unknown field name are rejected with the 5 closest option
+  names (they silently searched on field 0).
+- Ticket priority labels use the priority scale (6 = Major), not urgency.
+- `glpi_get_ticket` / `glpi_get_change` / `glpi_get_problem` counts use
+  `range=0-0` + `Content-Range` instead of downloading every followup/task.
+
+### Fixed — writes and validation
+- `glpi_link_tickets`: GLPI `Ticket_Ticket` constants are 3 = SON_OF and
+  4 = PARENT_OF with `tickets_id_1` as subject; v3 sent `link_type` 3
+  ("parent") as SON_OF, inverting the relation. New arguments `ticket_id`,
+  `other_ticket_id`, `relation` (`link`, `duplicate`, `child_of`,
+  `parent_of`); legacy `parent_id` / `child_id` / `link_type` keep working
+  (3 or 4 there mean "parent_id is the parent of child_id").
+- `glpi_assign_ticket` with both `user_id` and `group_id` creates both links
+  (the group was ignored) and returns both ids.
+- Every tool checks its required arguments and id parameters (integers;
+  required ids >= 1) before calling GLPI: a missing id is InvalidParams, not
+  `PUT Problem/undefined`.
+- Update tools reject unknown fields; `glpi_update_computer` no longer
+  forwards arbitrary arguments.
+- `glpi_set_validation_status` accepts `"2"` / `"3"`.
+- `include_deleted` is rejected: it mapped to `is_deleted=1`, which lists
+  ONLY deleted rows. `is_deleted` is documented as such.
+- `glpi_search_tickets` uses its validated arguments.
+
+### Security
+- `glpi_upload_document` reads `file_path` only inside `GLPI_UPLOAD_DIR`
+  (realpath, symlinks resolved; disabled when unset), max 20 MB. New inline
+  alternative `content_base64` + `filename`.
+
+### Other
+- stdio: the server shuts down (kills the GLPI session, exits 0) when stdin
+  ends or the transport closes.
+
 ## 3.4.0 — 2026-10-21
 
 ### Fixed (issue #9 — Change / Problem coverage)

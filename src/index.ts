@@ -76,7 +76,7 @@ import {
 } from './tool-helpers.js';
 
 /** Keep in sync with package.json (see CLAUDE.md). */
-const SERVER_VERSION = '3.4.0';
+const SERVER_VERSION = '3.5.0';
 
 // ---------------------------------------------------------------------------
 // Validation Schemas

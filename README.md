@@ -38,6 +38,7 @@ README documents what's exposed today.
 | `GLPI_TIMEOUT_MS` | no | HTTP request timeout in ms (default `15000`) |
 | `GLPI_MAX_RETRIES` | no | Max retries on 5xx / 429 / network errors (default `2`) |
 | `GLPI_DEBUG` | no | Set to any value to log HTTP retries/re-auth to stderr |
+| `GLPI_UPLOAD_DIR` | no | Directory `glpi_upload_document` may read `file_path` from (symlinks resolved). Unset = uploads by path are disabled; `content_base64` still works |
 | `MCP_TRANSPORT` | no | `stdio` (default) or `http` |
 | `MCP_HTTP_HOST` | no | HTTP bind address (default `127.0.0.1`) |
 | `MCP_HTTP_PORT` | no | HTTP port (default `3000`; falls back to `PORT`) |
@@ -166,10 +167,10 @@ loopback — startup logs a warning in that case.
 | `glpi_add_task` | Add a task with time tracking |
 | `glpi_add_solution` | Add a solution |
 | `glpi_assign_ticket` | Assign to user OR group |
-| `glpi_link_tickets` | link / duplicate / parent |
+| `glpi_link_tickets` | `ticket_id` `relation` `other_ticket_id`, relation = `link` / `duplicate` / `child_of` (ticket_id is a child of other_ticket_id) / `parent_of` (ticket_id is the parent). Legacy `parent_id` + `child_id` (+ `link_type`) still accepted |
 | `glpi_add_ticket_validation` | Request a validation |
 | `glpi_set_validation_status` | Approve (2) or refuse (3) |
-| `glpi_upload_document` | Upload a local file as a Document; `ticket_id` attaches it in the same call |
+| `glpi_upload_document` | Upload a Document (max 20 MB) from `content_base64` + `filename`, or from `file_path` — only when `GLPI_UPLOAD_DIR` is set and the file resolves inside it; `ticket_id` attaches it in the same call |
 | `glpi_attach_document_to_ticket` | Link an uploaded document to a ticket |
 
 ### Problems & Changes
