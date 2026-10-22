@@ -94,13 +94,8 @@ export function timelineEntry(
 
 /** Actor filter: a User id, or "me" for the account this server is connected as. */
 const actorId = (description?: string) => {
-  const schema = z
-    .preprocess(
-      (v) => (typeof v === 'string' && /^\s*\d+\s*$/.test(v) ? Number(v) : v),
-      z.union([z.number().int().nonnegative(), z.literal('me')])
-    )
-    .optional();
-  return description ? schema.describe(description) : schema;
+  const schema = z.union([z.number(), z.string()]).optional();
+  return schema.describe(description ? `${description}: user id or "me"` : 'User id or "me"');
 };
 
 const myUserIdCache = new WeakMap<GlpiClient, Promise<number>>();
@@ -122,13 +117,19 @@ export function resolveMyUserId(client: GlpiClient): Promise<number> {
   return cached;
 }
 
-async function actorValue(client: GlpiClient, value: number | 'me'): Promise<number> {
-  if (value !== 'me') return value;
-  try {
-    return await resolveMyUserId(client);
-  } catch (err) {
-    throw new ArgumentError(`Cannot resolve "me" to a user id (${err instanceof Error ? err.message : err}); pass the numeric id`);
+async function actorValue(client: GlpiClient, value: number | string): Promise<number> {
+  if (typeof value === 'string' && value.trim().toLowerCase() === 'me') {
+    try {
+      return await resolveMyUserId(client);
+    } catch (err) {
+      throw new ArgumentError(`Cannot resolve "me" to a user id (${err instanceof Error ? err.message : err}); pass the numeric id`);
+    }
   }
+  const n = typeof value === 'string' && /^\s*\d+\s*$/.test(value) ? Number(value) : value;
+  if (typeof n !== 'number' || !Number.isInteger(n) || n < 0) {
+    throw new ArgumentError(`user id must be a non-negative integer or "me", got ${JSON.stringify(value)}`);
+  }
+  return n;
 }
 
 // ---------------------------------------------------------------------------
