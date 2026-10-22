@@ -18,9 +18,47 @@ export const DEFAULT_LIST_LIMIT = 25;
 export const MAX_LIST_LIMIT = 500;
 export const DEFAULT_MAX_CONTENT_CHARS = 2000;
 
+const BASE64_IMAGE = /data:image\/[a-z0-9.+-]+;base64,[A-Za-z0-9+/=]+/gi;
+
+function cleanString(input: string): string {
+  let s = input;
+  if (s.includes('base64,')) s = s.replace(BASE64_IMAGE, '[image]');
+  // Pas de HTML (normal ou encodé) : on ne touche à rien
+  if (!/<\/?[a-z]|&(lt|#0*60|#x0*3c);\/?[a-z]/i.test(s)) return s;
+  // HTML encodé (&#60;p&#62;) : on le décode une fois pour faire apparaître les balises
+  if (!/<\/?[a-z]/i.test(s)) s = decodeEntities(s);
+  s = s
+    .replace(/<img[^>]*docid=(\d+)[^>]*>/gi, '[image docid=$1]')
+    .replace(/<img[^>]*>/gi, '[image]')
+    .replace(/<!--[\s\S]*?-->/g, '')
+    .replace(/<(script|style)[^>]*>[\s\S]*?<\/\1>/gi, '')
+    .replace(/<br\s*\/?>/gi, '\n')
+    .replace(/<\/(p|div|li|tr|h[1-6]|blockquote|pre|table)>/gi, '\n')
+    .replace(/<li[^>]*>/gi, '- ')
+    .replace(/<\/?[a-z][^>]*>/gi, '');
+  s = decodeEntities(s);
+  return s
+    .replace(/\r\n?/g, '\n')
+    .replace(/[ \t\u00a0]+/g, ' ')
+    .replace(/ *\n */g, '\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
+
+function cleanDeep(value: unknown): unknown {
+  if (typeof value === 'string') return cleanString(value);
+  if (Array.isArray(value)) return value.map(cleanDeep);
+  if (value && typeof value === 'object') {
+    const out: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(value as Record<string, unknown>)) out[k] = cleanDeep(v);
+    return out;
+  }
+  return value;
+}
+
 /** One compact JSON text block. */
 export function text(obj: unknown): CallToolResult {
-  return { content: [{ type: 'text', text: JSON.stringify(obj) }] };
+  return { content: [{ type: 'text', text: JSON.stringify(cleanDeep(obj)) }] };
 }
 
 // ---------------------------------------------------------------------------
